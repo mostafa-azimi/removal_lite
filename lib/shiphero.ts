@@ -286,12 +286,12 @@ export type CustomerAccount = {
 
 const CLIENTS_FROM_PRODUCTS_QUERY = /* GraphQL */ `
   query DiscoverCustomerAccounts($cursor: String) {
-    products(first: 100, after: $cursor) {
-      data {
+    products {
+      data(first: 100, after: $cursor) {
         edges {
           cursor
           node {
-            customer_account_id
+            account_id
             name
           }
         }
@@ -310,7 +310,7 @@ type ClientsFromProductsResponse = {
       edges: Array<{
         cursor: string;
         node: {
-          customer_account_id: string | null;
+          account_id: string | null;
           name: string | null;
         };
       }>;
@@ -334,7 +334,7 @@ export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
     const conn = data.products?.data;
     const edges = conn?.edges ?? [];
     for (const edge of edges) {
-      const id = edge.node.customer_account_id;
+      const id = edge.node.account_id;
       if (!id) continue;
       if (!seen.has(id)) {
         seen.set(id, { sampleProductName: edge.node.name ?? null });
