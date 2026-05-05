@@ -271,17 +271,70 @@ export async function fetchBinsForSkus(
 /**
  * Return the list of customer (client) accounts visible to the connected token.
  *
- * Shiphero's GraphQL schema doesn't expose a direct "list customer accounts"
- * query — but every Product carries a `customer_account_id`, so we can
- * enumerate distinct clients by paginating through the products list.
+ * Strategy: Shiphero exposes a top-level `users` connection. For a 3PL
+ * operator's token this returns one (or more) user records per customer
+ * account. We dedupe by `account.id` to get the distinct list of clients.
  *
- * For each distinct customer_account_id we keep one product name as a hint
- * so the dropdown shows something more useful than a bare UUID.
+ * If `users` isn't available on this account's schema, we fall back to
+ * paginating products and extracting unique `account_id` values.
  */
 export type CustomerAccount = {
   id: string;
   companyName: string;
   email: string | null;
+};
+
+const USERS_QUERY = /* GraphQL */ `
+  query ListUsers($cursor: String) {
+    users {
+      data(first: 100, after: $cursor) {
+        edges {
+          cursor
+          node {
+            id
+            first_name
+            last_name
+            email
+            username
+            account {
+              id
+              email
+              username
+              company_name
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+`;
+
+type UsersResponse = {
+  users: {
+    data: {
+      edges: Array<{
+        cursor: string;
+        node: {
+          id: string | null;
+          first_name: string | null;
+          last_name: string | null;
+          email: string | null;
+          username: string | null;
+          account: {
+            id: string | null;
+            email: string | null;
+            username: string | null;
+            company_name: string | null;
+          } | null;
+        };
+      }>;
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
+  };
 };
 
 const CLIENTS_FROM_PRODUCTS_QUERY = /* GraphQL */ `
@@ -319,13 +372,50 @@ type ClientsFromProductsResponse = {
   };
 };
 
-export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
+async function fetchCustomerAccountsViaUsers(): Promise<CustomerAccount[] | null> {
+  const seen = new Map<string, CustomerAccount>();
+  let cursor: string | null = null;
+
+  for (let i = 0; i < 50; i++) {
+    let data: UsersResponse;
+    try {
+      data = await gql<UsersResponse>(USERS_QUERY, { cursor });
+    } catch (err) {
+      // Schema doesn't have `users` — caller will fall back.
+      if (i === 0) return null;
+      throw err;
+    }
+    const conn = data.users?.data;
+    const edges = conn?.edges ?? [];
+    for (const edge of edges) {
+      const acct = edge.node.account;
+      if (!acct?.id) continue;
+      if (seen.has(acct.id)) continue;
+      const display =
+        acct.company_name ||
+        acct.username ||
+        [edge.node.first_name, edge.node.last_name].filter(Boolean).join(" ").trim() ||
+        acct.email ||
+        edge.node.email ||
+        acct.id;
+      seen.set(acct.id, {
+        id: acct.id,
+        companyName: display,
+        email: acct.email || edge.node.email,
+      });
+    }
+    if (!conn?.pageInfo?.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+    if (!cursor) break;
+  }
+
+  return [...seen.values()];
+}
+
+async function fetchCustomerAccountsViaProducts(): Promise<CustomerAccount[]> {
   const seen = new Map<string, { sampleProductName: string | null }>();
   let cursor: string | null = null;
 
-  // Paginate through products. We cap at 50 pages (5,000 products) so very
-  // large catalogs don't make the dropdown take forever to load. If you have
-  // more than 5,000 SKUs, raise this — or switch to a dedicated client list.
   for (let i = 0; i < 50; i++) {
     const data: ClientsFromProductsResponse = await gql<ClientsFromProductsResponse>(
       CLIENTS_FROM_PRODUCTS_QUERY,
@@ -345,15 +435,23 @@ export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
     if (!cursor) break;
   }
 
-  const accounts: CustomerAccount[] = [...seen.entries()].map(([id, info]) => ({
+  return [...seen.entries()].map(([id, info]) => ({
     id,
-    // No company name available from products query; show the ID with a
-    // sample product name as a hint so the user can tell which client is which.
     companyName: info.sampleProductName
       ? `${id} — e.g. ${info.sampleProductName}`
       : id,
     email: null,
   }));
+}
+
+export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
+  // Primary path: top-level users query (returns clients reliably for 3PLs).
+  let accounts = await fetchCustomerAccountsViaUsers();
+
+  // Fallback: derive from products if users isn't available.
+  if (!accounts || accounts.length === 0) {
+    accounts = await fetchCustomerAccountsViaProducts();
+  }
 
   // Sort alphabetically for the dropdown.
   accounts.sort((a, b) =>
