@@ -270,7 +270,13 @@ export async function fetchBinsForSkus(
 
 /**
  * Return the list of customer (client) accounts visible to the connected token.
- * For a 3PL operator's token this is the list of brands they fulfill for.
+ *
+ * Shiphero's GraphQL schema doesn't expose a direct "list customer accounts"
+ * query — but every Product carries a `customer_account_id`, so we can
+ * enumerate distinct clients by paginating through the products list.
+ *
+ * For each distinct customer_account_id we keep one product name as a hint
+ * so the dropdown shows something more useful than a bare UUID.
  */
 export type CustomerAccount = {
   id: string;
@@ -278,82 +284,76 @@ export type CustomerAccount = {
   email: string | null;
 };
 
-const CUSTOMER_ACCOUNTS_QUERY = /* GraphQL */ `
-  query ListCustomerAccounts($cursor: String) {
-    account {
+const CLIENTS_FROM_PRODUCTS_QUERY = /* GraphQL */ `
+  query DiscoverCustomerAccounts($cursor: String) {
+    products(first: 100, after: $cursor) {
       data {
-        id
-        email
-        customer_accounts(first: 100, after: $cursor) {
-          edges {
-            cursor
-            node {
-              id
-              email
-              username
-              company_name
-            }
+        edges {
+          cursor
+          node {
+            customer_account_id
+            name
           }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
     }
   }
 `;
 
-type CustomerAccountsResponse = {
-  account: {
+type ClientsFromProductsResponse = {
+  products: {
     data: {
-      id: string;
-      email: string | null;
-      customer_accounts: {
-        edges: Array<{
-          cursor: string;
-          node: {
-            id: string;
-            email: string | null;
-            username: string | null;
-            company_name: string | null;
-          };
-        }>;
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      };
+      edges: Array<{
+        cursor: string;
+        node: {
+          customer_account_id: string | null;
+          name: string | null;
+        };
+      }>;
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
     };
   };
 };
 
 export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
-  const accounts: CustomerAccount[] = [];
+  const seen = new Map<string, { sampleProductName: string | null }>();
   let cursor: string | null = null;
 
-  // Paginate (most 3PLs have <100 clients, but be safe).
-  for (let i = 0; i < 20; i++) {
-    const data: CustomerAccountsResponse = await gql<CustomerAccountsResponse>(
-      CUSTOMER_ACCOUNTS_QUERY,
+  // Paginate through products. We cap at 50 pages (5,000 products) so very
+  // large catalogs don't make the dropdown take forever to load. If you have
+  // more than 5,000 SKUs, raise this — or switch to a dedicated client list.
+  for (let i = 0; i < 50; i++) {
+    const data: ClientsFromProductsResponse = await gql<ClientsFromProductsResponse>(
+      CLIENTS_FROM_PRODUCTS_QUERY,
       { cursor }
     );
-    const conn = data.account?.data?.customer_accounts;
+    const conn = data.products?.data;
     const edges = conn?.edges ?? [];
     for (const edge of edges) {
-      const id = edge.node.id;
+      const id = edge.node.customer_account_id;
       if (!id) continue;
-      accounts.push({
-        id,
-        companyName:
-          edge.node.company_name ||
-          edge.node.username ||
-          edge.node.email ||
-          id,
-        email: edge.node.email,
-      });
+      if (!seen.has(id)) {
+        seen.set(id, { sampleProductName: edge.node.name ?? null });
+      }
     }
     if (!conn?.pageInfo?.hasNextPage) break;
     cursor = conn.pageInfo.endCursor;
     if (!cursor) break;
   }
+
+  const accounts: CustomerAccount[] = [...seen.entries()].map(([id, info]) => ({
+    id,
+    // No company name available from products query; show the ID with a
+    // sample product name as a hint so the user can tell which client is which.
+    companyName: info.sampleProductName
+      ? `${id} — e.g. ${info.sampleProductName}`
+      : id,
+    email: null,
+  }));
 
   // Sort alphabetically for the dropdown.
   accounts.sort((a, b) =>
