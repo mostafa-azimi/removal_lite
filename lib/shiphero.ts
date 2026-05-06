@@ -116,18 +116,24 @@ type ProductsResponse = {
 };
 
 /**
- * Note for 3PLs: Shiphero scopes products to a client (customer_account) using the
- * `customer_account_id` argument on the `products` query. Pass it through and Shiphero
- * will only return SKUs belonging to that client.
+ * Bin lookup by SKU. We deliberately don't pass customer_account_id here —
+ * Shiphero's filter behaviour is finicky and silently returns 0 hits when
+ * the type/format isn't exactly right. Since the 3PL operator's token can
+ * see all products anyway, we look up by SKU alone and (optionally) filter
+ * on the client side using the product's `account_id` field if provided.
+ *
+ * `first: 10` because the same SKU can technically exist under multiple
+ * customer accounts; we'll union all of their bins.
  */
 const PRODUCT_BINS_QUERY = /* GraphQL */ `
-  query GetSkuLocations($sku: String!, $customerAccountId: String) {
-    products(sku: $sku, customer_account_id: $customerAccountId) {
-      data(first: 1) {
+  query GetSkuLocations($sku: String!) {
+    products(sku: $sku) {
+      data(first: 10) {
         edges {
           node {
             sku
             name
+            account_id
             warehouse_products {
               warehouse_id
               on_hand
@@ -157,13 +163,14 @@ const PRODUCT_BINS_QUERY = /* GraphQL */ `
  * `inventory_bin` field per warehouse.
  */
 const PRODUCT_BINS_QUERY_FALLBACK = /* GraphQL */ `
-  query GetSkuLocations($sku: String!, $customerAccountId: String) {
-    products(sku: $sku, customer_account_id: $customerAccountId) {
-      data(first: 1) {
+  query GetSkuLocations($sku: String!) {
+    products(sku: $sku) {
+      data(first: 10) {
         edges {
           node {
             sku
             name
+            account_id
             warehouse_products {
               warehouse_id
               on_hand
@@ -179,24 +186,28 @@ const PRODUCT_BINS_QUERY_FALLBACK = /* GraphQL */ `
   }
 `;
 
-export async function fetchBinsForSku(
-  sku: string,
-  customerAccountId?: string | null
-): Promise<BinRow[]> {
-  const variables = { sku, customerAccountId: customerAccountId || null };
-  let data: ProductsResponse;
-  try {
-    data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY, variables);
-  } catch (err) {
-    // If the locations connection isn't available, fall back to bin-only.
-    data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY_FALLBACK, variables);
-  }
+type ProductNode = {
+  sku: string;
+  name: string | null;
+  account_id?: string | null;
+  warehouse_products: Array<{
+    warehouse_id: string | null;
+    on_hand: number | null;
+    inventory_bin: string | null;
+    warehouse: { identifier: string | null } | null;
+    locations?: {
+      edges: Array<{
+        node: {
+          location_name: string | null;
+          on_hand: number | null;
+        };
+      }>;
+    };
+  }>;
+};
 
-  const edges = data.products?.data?.edges ?? [];
-  if (edges.length === 0) return [];
-  const node = edges[0].node;
+function buildBinRowsFromProduct(node: ProductNode): BinRow[] {
   const rows: BinRow[] = [];
-
   for (const wp of node.warehouse_products ?? []) {
     const warehouseId = wp.warehouse_id ?? null;
     const warehouseIdentifier = wp.warehouse?.identifier ?? null;
@@ -207,7 +218,6 @@ export async function fetchBinsForSku(
         const bin = le.node.location_name?.trim();
         if (!bin) continue;
         const onHand = le.node.on_hand ?? 0;
-        // Filter out empty bins — we don't want to walk to them.
         if (onHand <= 0) continue;
         rows.push({
           sku: node.sku,
@@ -219,7 +229,6 @@ export async function fetchBinsForSku(
         });
       }
     } else {
-      // Fallback: a single row per warehouse using inventory_bin.
       const onHand = wp.on_hand ?? 0;
       if (onHand <= 0) continue;
       const bin = wp.inventory_bin?.trim() || "(no bin)";
@@ -232,6 +241,39 @@ export async function fetchBinsForSku(
         onHand,
       });
     }
+  }
+  return rows;
+}
+
+export async function fetchBinsForSku(
+  sku: string,
+  customerAccountId?: string | null
+): Promise<BinRow[]> {
+  const variables = { sku };
+  let data: ProductsResponse;
+  try {
+    data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY, variables);
+  } catch (err) {
+    // If the locations connection isn't available, fall back to bin-only.
+    data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY_FALLBACK, variables);
+  }
+
+  const edges = data.products?.data?.edges ?? [];
+  if (edges.length === 0) return [];
+
+  // If a client was selected, prefer the product whose account_id matches.
+  // If none match (e.g. account_id field doesn't represent the customer the
+  // way we think), fall back to all products to avoid silently dropping bins.
+  const wantedId = customerAccountId?.trim();
+  let nodes = edges.map((e) => e.node as ProductNode);
+  if (wantedId) {
+    const filtered = nodes.filter((n) => String(n.account_id ?? "") === wantedId);
+    if (filtered.length > 0) nodes = filtered;
+  }
+
+  const rows: BinRow[] = [];
+  for (const node of nodes) {
+    rows.push(...buildBinRowsFromProduct(node));
   }
   return rows;
 }
