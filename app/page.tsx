@@ -11,15 +11,16 @@ type CsvLine = {
   orderNumber: string | null;
 };
 
-type PicklistRow = {
+type BinRow = {
   sku: string;
   productName: string | null;
   warehouseId: string | null;
   warehouseIdentifier: string | null;
   bin: string;
   onHand: number;
-  needed: number;
 };
+
+type PicklistRow = BinRow & { needed: number };
 
 type OrderResult = {
   orderNumber: string;
@@ -28,20 +29,16 @@ type OrderResult = {
   totals: { uniqueSkus: number; totalQty: number };
 };
 
-type ApiResponse = {
-  orders: OrderResult[];
-  globalTotals: {
-    orders: number;
-    lines: number;
-    uniqueSkus: number;
-    totalQty: number;
-  };
-};
-
 // Only three columns matter from the CSV.
 const SKU_HEADER = "Product Sku (Required)";
 const QTY_HEADER = "Quantity";
 const ORDER_HEADER = "Order Number (Required)";
+
+const NO_ORDER_KEY = "(no order #)";
+const BATCH_SIZE = 40;
+
+// Natural alphanumeric collator for bin sorting.
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export default function Home() {
   const [clients, setClients] = useState<ClientAccount[] | null>(null);
@@ -51,12 +48,12 @@ export default function Home() {
   const [csvFileName, setCsvFileName] = useState<string>("");
   const [csvWarning, setCsvWarning] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [result, setResult] = useState<ApiResponse | null>(null);
+  const [orders, setOrders] = useState<OrderResult[] | null>(null);
   const [generatedAt, setGeneratedAt] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load clients on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -84,7 +81,7 @@ export default function Home() {
     setCsvFileName(file.name);
     setCsvWarning(null);
     setSubmitError(null);
-    setResult(null);
+    setOrders(null);
     Papa.parse<Record<string, string>>(file, {
       header: true,
       skipEmptyLines: true,
@@ -95,7 +92,7 @@ export default function Home() {
         const hasOrder = headers.includes(ORDER_HEADER);
         if (!hasSku || !hasQty || !hasOrder) {
           setCsvWarning(
-            `Couldn't find required columns. Expected '${ORDER_HEADER}', '${SKU_HEADER}', and '${QTY_HEADER}'. Make sure you're using the official Shiphero order upload template.`
+            `Couldn't find required columns. Expected '${ORDER_HEADER}', '${SKU_HEADER}', and '${QTY_HEADER}'.`
           );
           setCsvLines(null);
           return;
@@ -132,27 +129,107 @@ export default function Home() {
     if (!csvLines || csvLines.length === 0) return;
     setLoading(true);
     setSubmitError(null);
-    setResult(null);
+    setOrders(null);
+
     try {
-      const res = await fetch("/api/picklist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lines: csvLines,
-          customerAccountId: selectedClient || null,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        setSubmitError(json.error || `Request failed (${res.status})`);
-      } else {
-        setResult(json);
-        setGeneratedAt(new Date().toLocaleString());
+      // Group lines by order, summing duplicate SKUs within an order.
+      const ordersMap = new Map<string, Map<string, number>>();
+      for (const line of csvLines) {
+        const orderKey = (line.orderNumber || "").trim() || NO_ORDER_KEY;
+        if (!ordersMap.has(orderKey)) ordersMap.set(orderKey, new Map());
+        const skuMap = ordersMap.get(orderKey)!;
+        skuMap.set(line.sku, (skuMap.get(line.sku) || 0) + line.qty);
       }
+
+      // Collect all unique SKUs across every order (one Shiphero call per SKU).
+      const allSkus = new Set<string>();
+      for (const skuMap of ordersMap.values()) {
+        for (const sku of skuMap.keys()) allSkus.add(sku);
+      }
+      const skuList = [...allSkus];
+      setProgress({ done: 0, total: skuList.length });
+
+      // Batch through Shiphero in chunks. Each batch is its own server call
+      // so no individual request hits the timeout.
+      const allBins: Record<string, BinRow[]> = {};
+      const allErrors: Record<string, string> = {};
+      for (let i = 0; i < skuList.length; i += BATCH_SIZE) {
+        const batch = skuList.slice(i, i + BATCH_SIZE);
+        const res = await fetch("/api/bins", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skus: batch,
+            customerAccountId: selectedClient || null,
+          }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          let msg = text;
+          try {
+            msg = JSON.parse(text).error || text;
+          } catch {}
+          throw new Error(`Batch ${Math.floor(i / BATCH_SIZE) + 1} failed: ${msg}`);
+        }
+        const json = (await res.json()) as {
+          bins: Record<string, BinRow[]>;
+          errors: Record<string, string>;
+        };
+        Object.assign(allBins, json.bins);
+        Object.assign(allErrors, json.errors);
+        setProgress({ done: Math.min(i + BATCH_SIZE, skuList.length), total: skuList.length });
+      }
+
+      // Build per-order results from the aggregated bins map.
+      const builtOrders: OrderResult[] = [];
+      for (const [orderNumber, skuMap] of ordersMap.entries()) {
+        const rows: PicklistRow[] = [];
+        const missing: OrderResult["missing"] = [];
+        for (const [sku, needed] of skuMap.entries()) {
+          if (allErrors[sku]) {
+            missing.push({ sku, needed, reason: allErrors[sku] });
+            continue;
+          }
+          const bins = allBins[sku];
+          if (!bins || bins.length === 0) {
+            missing.push({
+              sku,
+              needed,
+              reason: "No bins with on-hand quantity > 0 found for this client",
+            });
+            continue;
+          }
+          for (const bin of bins) {
+            rows.push({ ...bin, needed });
+          }
+        }
+        rows.sort((a, b) => {
+          const w = collator.compare(a.warehouseIdentifier ?? "", b.warehouseIdentifier ?? "");
+          if (w !== 0) return w;
+          const bin = collator.compare(a.bin, b.bin);
+          if (bin !== 0) return bin;
+          return collator.compare(a.sku, b.sku);
+        });
+        builtOrders.push({
+          orderNumber,
+          rows,
+          missing,
+          totals: {
+            uniqueSkus: skuMap.size,
+            totalQty: [...skuMap.values()].reduce((a, b) => a + b, 0),
+          },
+        });
+      }
+      builtOrders.sort((a, b) =>
+        collator.compare(a.orderNumber, b.orderNumber)
+      );
+      setOrders(builtOrders);
+      setGeneratedAt(new Date().toLocaleString());
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   }
 
@@ -160,6 +237,18 @@ export default function Home() {
     if (!selectedClient || !clients) return "All clients";
     return clients.find((c) => c.id === selectedClient)?.companyName ?? selectedClient;
   }, [selectedClient, clients]);
+
+  const globalTotals = useMemo(() => {
+    if (!orders) return null;
+    const uniqueSkus = new Set<string>();
+    let totalQty = 0;
+    for (const o of orders) {
+      for (const r of o.rows) uniqueSkus.add(r.sku);
+      for (const m of o.missing) uniqueSkus.add(m.sku);
+      totalQty += o.totals.totalQty;
+    }
+    return { orders: orders.length, uniqueSkus: uniqueSkus.size, totalQty };
+  }, [orders]);
 
   return (
     <main className="screen">
@@ -186,9 +275,7 @@ export default function Home() {
               onChange={(e) => setSelectedClient(e.target.value)}
               disabled={!clients}
             >
-              <option value="">
-                {clients ? "All clients (no filter)" : "Loading clients…"}
-              </option>
+              <option value="">{clients ? "All clients (no filter)" : "Loading clients…"}</option>
               {clients?.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.companyName}
@@ -204,12 +291,7 @@ export default function Home() {
         <div className="card">
           <h2>2. Upload the Shiphero order CSV</h2>
           <div className="row">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,text/csv"
-              onChange={handleFile}
-            />
+            <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={handleFile} />
             {csvFileName && (
               <span style={{ color: "#555" }}>
                 {csvFileName}
@@ -217,7 +299,11 @@ export default function Home() {
               </span>
             )}
           </div>
-          {csvWarning && <div className="banner warn" style={{ marginTop: 12 }}>{csvWarning}</div>}
+          {csvWarning && (
+            <div className="banner warn" style={{ marginTop: 12 }}>
+              {csvWarning}
+            </div>
+          )}
           <p style={{ color: "#777", fontSize: 12, margin: "8px 0 0" }}>
             Only three columns are read: <code>{ORDER_HEADER}</code>, <code>{SKU_HEADER}</code>, and{" "}
             <code>{QTY_HEADER}</code>. Everything else is ignored.
@@ -232,33 +318,50 @@ export default function Home() {
               onClick={generate}
               disabled={!csvLines || csvLines.length === 0 || loading}
             >
-              {loading ? "Looking up bin locations…" : "Generate pick lists"}
+              {loading
+                ? progress
+                  ? `Looking up bins… ${progress.done} of ${progress.total} SKUs`
+                  : "Looking up bin locations…"
+                : "Generate pick lists"}
             </button>
-            {result && (
+            {orders && (
               <button className="secondary" onClick={() => window.print()}>
                 Print
               </button>
             )}
           </div>
-          {submitError && <div className="banner error" style={{ marginTop: 12 }}>{submitError}</div>}
-          {result && (
+          {progress && progress.total > 0 && (
+            <div className="progress-track" style={{ marginTop: 12 }}>
+              <div
+                className="progress-fill"
+                style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
+              />
+            </div>
+          )}
+          {submitError && (
+            <div className="banner error" style={{ marginTop: 12 }}>
+              {submitError}
+            </div>
+          )}
+          {orders && globalTotals && (
             <div className="banner info" style={{ marginTop: 12 }}>
-              {result.globalTotals.orders} order{result.globalTotals.orders === 1 ? "" : "s"} · {" "}
-              {result.globalTotals.uniqueSkus} unique SKUs · {result.globalTotals.totalQty} units
+              {globalTotals.orders} order{globalTotals.orders === 1 ? "" : "s"} · {globalTotals.uniqueSkus}{" "}
+              unique SKUs · {globalTotals.totalQty} units
             </div>
           )}
         </div>
       </div>
 
-      {result && result.orders.map((order, idx) => (
-        <OrderSection
-          key={order.orderNumber}
-          order={order}
-          isFirst={idx === 0}
-          clientName={selectedClientName}
-          generatedAt={generatedAt}
-        />
-      ))}
+      {orders &&
+        orders.map((order, idx) => (
+          <OrderSection
+            key={order.orderNumber}
+            order={order}
+            isFirst={idx === 0}
+            clientName={selectedClientName}
+            generatedAt={generatedAt}
+          />
+        ))}
     </main>
   );
 }
@@ -274,7 +377,6 @@ function OrderSection({
   clientName: string;
   generatedAt: string;
 }) {
-  // Group rows by warehouse so each warehouse has its own bin-sorted block.
   const grouped = useMemo(() => {
     const groups = new Map<string, PicklistRow[]>();
     for (const r of order.rows) {
