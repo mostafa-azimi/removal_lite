@@ -8,7 +8,6 @@ type ClientAccount = { id: string; companyName: string; email: string | null };
 type CsvLine = {
   sku: string;
   qty: number;
-  warehouse: string | null;
   orderNumber: string | null;
 };
 
@@ -20,18 +19,28 @@ type PicklistRow = {
   bin: string;
   onHand: number;
   needed: number;
-  orderNumbers: string[];
+};
+
+type OrderResult = {
+  orderNumber: string;
+  rows: PicklistRow[];
+  missing: Array<{ sku: string; needed: number; reason: string }>;
+  totals: { uniqueSkus: number; totalQty: number };
 };
 
 type ApiResponse = {
-  rows: PicklistRow[];
-  missing: Array<{ sku: string; needed: number; reason: string }>;
-  totals: { lines: number; uniqueSkus: number; totalQty: number };
+  orders: OrderResult[];
+  globalTotals: {
+    orders: number;
+    lines: number;
+    uniqueSkus: number;
+    totalQty: number;
+  };
 };
 
+// Only three columns matter from the CSV.
 const SKU_HEADER = "Product Sku (Required)";
 const QTY_HEADER = "Quantity";
-const WAREHOUSE_HEADER = "Warehouse";
 const ORDER_HEADER = "Order Number (Required)";
 
 export default function Home() {
@@ -44,6 +53,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [result, setResult] = useState<ApiResponse | null>(null);
+  const [generatedAt, setGeneratedAt] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load clients on mount
@@ -82,29 +92,32 @@ export default function Home() {
         const headers = parsed.meta.fields || [];
         const hasSku = headers.includes(SKU_HEADER);
         const hasQty = headers.includes(QTY_HEADER);
-        if (!hasSku || !hasQty) {
+        const hasOrder = headers.includes(ORDER_HEADER);
+        if (!hasSku || !hasQty || !hasOrder) {
           setCsvWarning(
-            `Couldn't find required columns. Expected '${SKU_HEADER}' and '${QTY_HEADER}'. Make sure you're using the official Shiphero order upload template.`
+            `Couldn't find required columns. Expected '${ORDER_HEADER}', '${SKU_HEADER}', and '${QTY_HEADER}'. Make sure you're using the official Shiphero order upload template.`
           );
           setCsvLines(null);
           return;
         }
         const lines: CsvLine[] = [];
+        let missingOrder = 0;
         for (const row of parsed.data) {
           const sku = (row[SKU_HEADER] || "").trim();
           const qtyRaw = (row[QTY_HEADER] || "").trim();
           if (!sku || !qtyRaw) continue;
           const qty = Number(qtyRaw);
           if (!Number.isFinite(qty) || qty <= 0) continue;
-          lines.push({
-            sku,
-            qty,
-            warehouse: (row[WAREHOUSE_HEADER] || "").trim() || null,
-            orderNumber: (row[ORDER_HEADER] || "").trim() || null,
-          });
+          const orderNumber = (row[ORDER_HEADER] || "").trim() || null;
+          if (!orderNumber) missingOrder += 1;
+          lines.push({ sku, qty, orderNumber });
         }
         if (lines.length === 0) {
           setCsvWarning("File parsed, but no usable SKU/Quantity rows were found.");
+        } else if (missingOrder > 0) {
+          setCsvWarning(
+            `${missingOrder} of ${lines.length} rows are missing an order number — they'll be grouped under "(no order #)".`
+          );
         }
         setCsvLines(lines);
       },
@@ -134,6 +147,7 @@ export default function Home() {
         setSubmitError(json.error || `Request failed (${res.status})`);
       } else {
         setResult(json);
+        setGeneratedAt(new Date().toLocaleString());
       }
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
@@ -141,26 +155,6 @@ export default function Home() {
       setLoading(false);
     }
   }
-
-  // Group rows by warehouse for display
-  const grouped = useMemo(() => {
-    if (!result) return [];
-    const groups = new Map<string, PicklistRow[]>();
-    for (const r of result.rows) {
-      const key = r.warehouseIdentifier || r.warehouseId || "Warehouse";
-      const arr = groups.get(key) ?? [];
-      arr.push(r);
-      groups.set(key, arr);
-    }
-    return [...groups.entries()].sort(([a], [b]) =>
-      a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
-    );
-  }, [result]);
-
-  const orderNumbers = useMemo(() => {
-    if (!csvLines) return [];
-    return [...new Set(csvLines.map((l) => l.orderNumber).filter(Boolean))].sort() as string[];
-  }, [csvLines]);
 
   const selectedClientName = useMemo(() => {
     if (!selectedClient || !clients) return "All clients";
@@ -172,7 +166,7 @@ export default function Home() {
       <div className="no-print">
         <h1>Shiphero Pick List</h1>
         <p className="subtitle">
-          Upload an order CSV, pick the client, and print a bin-sorted pick list.
+          Upload an order CSV, pick the client, and print bin-sorted pick lists — one page per order.
         </p>
 
         {clientsError && (
@@ -224,6 +218,10 @@ export default function Home() {
             )}
           </div>
           {csvWarning && <div className="banner warn" style={{ marginTop: 12 }}>{csvWarning}</div>}
+          <p style={{ color: "#777", fontSize: 12, margin: "8px 0 0" }}>
+            Only three columns are read: <code>{ORDER_HEADER}</code>, <code>{SKU_HEADER}</code>, and{" "}
+            <code>{QTY_HEADER}</code>. Everything else is ignored.
+          </p>
         </div>
 
         <div className="card">
@@ -234,7 +232,7 @@ export default function Home() {
               onClick={generate}
               disabled={!csvLines || csvLines.length === 0 || loading}
             >
-              {loading ? "Looking up bin locations…" : "Generate pick list"}
+              {loading ? "Looking up bin locations…" : "Generate pick lists"}
             </button>
             {result && (
               <button className="secondary" onClick={() => window.print()}>
@@ -243,111 +241,144 @@ export default function Home() {
             )}
           </div>
           {submitError && <div className="banner error" style={{ marginTop: 12 }}>{submitError}</div>}
+          {result && (
+            <div className="banner info" style={{ marginTop: 12 }}>
+              {result.globalTotals.orders} order{result.globalTotals.orders === 1 ? "" : "s"} · {" "}
+              {result.globalTotals.uniqueSkus} unique SKUs · {result.globalTotals.totalQty} units
+            </div>
+          )}
         </div>
       </div>
 
-      {result && (
-        <section className="picklist">
-          <div className="meta">
-            <div>
-              <span className="label">Client</span>
-              {selectedClientName}
-            </div>
-            <div>
-              <span className="label">Order #</span>
-              {orderNumbers.length ? orderNumbers.join(", ") : "—"}
-            </div>
-            <div>
-              <span className="label">Generated</span>
-              {new Date().toLocaleString()}
-            </div>
-            <div>
-              <span className="label">Lines</span>
-              {result.rows.length}
-            </div>
-            <div>
-              <span className="label">Unique SKUs</span>
-              {result.totals.uniqueSkus}
-            </div>
-            <div>
-              <span className="label">Total units</span>
-              {result.totals.totalQty}
-            </div>
-          </div>
-
-          {grouped.length === 0 && (
-            <div className="banner warn">
-              No pickable bins were found. Either the SKUs aren&apos;t set up for this client,
-              or all bins are empty.
-            </div>
-          )}
-
-          {grouped.map(([warehouse, rows]) => (
-            <div key={warehouse} className="warehouse-section">
-              <h3>Warehouse: {warehouse}</h3>
-              <table className="pick">
-                <thead>
-                  <tr>
-                    <th style={{ width: 32 }}>✓</th>
-                    <th style={{ width: "22%" }}>Bin</th>
-                    <th style={{ width: "28%" }}>SKU</th>
-                    <th>Product</th>
-                    <th style={{ width: "10%", textAlign: "right" }}>On hand</th>
-                    <th style={{ width: "12%", textAlign: "right" }}>Pick qty</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r, i) => (
-                    <tr key={`${r.bin}-${r.sku}-${i}`}>
-                      <td className="checkbox">
-                        <span className="box" />
-                      </td>
-                      <td className="bin">{r.bin}</td>
-                      <td className="sku">{r.sku}</td>
-                      <td>
-                        {r.productName || ""}
-                        {r.orderNumbers.length > 1 && (
-                          <div className="product-name">
-                            Orders: {r.orderNumbers.join(", ")}
-                          </div>
-                        )}
-                      </td>
-                      <td className="qty" style={{ color: "#666", fontWeight: 500 }}>
-                        {r.onHand}
-                      </td>
-                      <td className="qty">{r.needed}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-
-          {result.missing.length > 0 && (
-            <div className="missing">
-              <h4>Could not locate ({result.missing.length})</h4>
-              <table className="pick">
-                <thead>
-                  <tr>
-                    <th>SKU</th>
-                    <th style={{ textAlign: "right", width: "12%" }}>Needed</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.missing.map((m) => (
-                    <tr key={m.sku}>
-                      <td className="sku">{m.sku}</td>
-                      <td className="qty">{m.needed}</td>
-                      <td>{m.reason}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
+      {result && result.orders.map((order, idx) => (
+        <OrderSection
+          key={order.orderNumber}
+          order={order}
+          isFirst={idx === 0}
+          clientName={selectedClientName}
+          generatedAt={generatedAt}
+        />
+      ))}
     </main>
+  );
+}
+
+function OrderSection({
+  order,
+  isFirst,
+  clientName,
+  generatedAt,
+}: {
+  order: OrderResult;
+  isFirst: boolean;
+  clientName: string;
+  generatedAt: string;
+}) {
+  // Group rows by warehouse so each warehouse has its own bin-sorted block.
+  const grouped = useMemo(() => {
+    const groups = new Map<string, PicklistRow[]>();
+    for (const r of order.rows) {
+      const key = r.warehouseIdentifier || r.warehouseId || "Warehouse";
+      const arr = groups.get(key) ?? [];
+      arr.push(r);
+      groups.set(key, arr);
+    }
+    return [...groups.entries()].sort(([a], [b]) =>
+      a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
+    );
+  }, [order.rows]);
+
+  return (
+    <section className={`picklist order-page${isFirst ? "" : " page-break"}`}>
+      <div className="order-header">
+        <h2>Order #{order.orderNumber}</h2>
+      </div>
+      <div className="meta">
+        <div>
+          <span className="label">Client</span>
+          {clientName}
+        </div>
+        <div>
+          <span className="label">Generated</span>
+          {generatedAt}
+        </div>
+        <div>
+          <span className="label">Unique SKUs</span>
+          {order.totals.uniqueSkus}
+        </div>
+        <div>
+          <span className="label">Total units</span>
+          {order.totals.totalQty}
+        </div>
+        <div>
+          <span className="label">Pick lines</span>
+          {order.rows.length}
+        </div>
+      </div>
+
+      {grouped.length === 0 && (
+        <div className="banner warn">
+          No pickable bins were found for this order. See &quot;Could not locate&quot; below.
+        </div>
+      )}
+
+      {grouped.map(([warehouse, rows]) => (
+        <div key={warehouse} className="warehouse-section">
+          <h3>Warehouse: {warehouse}</h3>
+          <table className="pick">
+            <thead>
+              <tr>
+                <th style={{ width: 32 }}>✓</th>
+                <th style={{ width: "22%" }}>Bin</th>
+                <th style={{ width: "28%" }}>SKU</th>
+                <th>Product</th>
+                <th style={{ width: "10%", textAlign: "right" }}>On hand</th>
+                <th style={{ width: "12%", textAlign: "right" }}>Pick qty</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={`${r.bin}-${r.sku}-${i}`}>
+                  <td className="checkbox">
+                    <span className="box" />
+                  </td>
+                  <td className="bin">{r.bin}</td>
+                  <td className="sku">{r.sku}</td>
+                  <td>{r.productName || ""}</td>
+                  <td className="qty" style={{ color: "#666", fontWeight: 500 }}>
+                    {r.onHand}
+                  </td>
+                  <td className="qty">{r.needed}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+
+      {order.missing.length > 0 && (
+        <div className="missing">
+          <h4>Could not locate ({order.missing.length})</h4>
+          <table className="pick">
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th style={{ textAlign: "right", width: "12%" }}>Needed</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {order.missing.map((m) => (
+                <tr key={m.sku}>
+                  <td className="sku">{m.sku}</td>
+                  <td className="qty">{m.needed}</td>
+                  <td>{m.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }

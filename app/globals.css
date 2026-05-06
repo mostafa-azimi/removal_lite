@@ -134,6 +134,14 @@ button.secondary {
   border: 1px solid #e3e3e8;
   border-radius: 10px;
   padding: 24px 28px;
+  margin-bottom: 20px;
+}
+
+.order-header h2 {
+  font-size: 22px;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 3px solid #111;
 }
 
 .picklist .meta {
@@ -254,6 +262,19 @@ table.pick td.checkbox .box {
     border: 0;
     padding: 0;
     border-radius: 0;
+    margin-bottom: 0;
+  }
+
+  /* Each order starts on a fresh page when printed. */
+  .order-page.page-break {
+    page-break-before: always;
+    break-before: page;
+  }
+
+  .order-header h2 {
+    font-size: 18pt;
+    margin: 0 0 10px;
+    padding-bottom: 6px;
   }
 
   .warehouse-section {
