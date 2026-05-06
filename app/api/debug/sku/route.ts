@@ -43,6 +43,16 @@ const QUERY = /* GraphQL */ `
               warehouse {
                 identifier
               }
+              locations(first: 50) {
+                edges {
+                  node {
+                    quantity
+                    location {
+                      name
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -91,10 +101,12 @@ export async function GET(req: NextRequest) {
             on_hand: wp.on_hand,
             inventory_bin: wp.inventory_bin,
             locationsCount: wp.locations?.edges?.length ?? 0,
-            locations: (wp.locations?.edges ?? []).map((le: any) => ({
-              bin: le.node?.location?.name,
-              quantity: le.node?.quantity,
-            })),
+            locations: (wp.locations?.edges ?? [])
+              .map((le: any) => ({
+                bin: le.node?.location?.name,
+                quantity: le.node?.quantity,
+              }))
+              .filter((l: any) => (l.quantity ?? 0) > 0),
           })),
         };
       }),

@@ -156,15 +156,11 @@ type ProductsResponse = {
 /**
  * Bin lookup by SKU.
  *
- * We use the cheap, low-credit version of the query: one row per warehouse
- * using the warehouse-level `inventory_bin` (the SKU's primary bin). We
- * deliberately avoid the per-bin `locations` connection because that costs
- * ~1011 credits per call vs ~10-20 for this version, and Shiphero's credit
- * regenerates at 60/sec — the expensive query rate-limits us within seconds.
- *
- * Trade-off: SKUs split across multiple bins in the same warehouse will
- * only show their primary bin. For the typical pick-list workflow this is
- * acceptable.
+ * Shiphero stores the actual bin code in the `locations` connection on each
+ * warehouse_product (the `inventory_bin` field comes back as whitespace in
+ * many accounts). We query locations(first: 50) — at this size and with
+ * products(first: 1) the total complexity is well under the 4004-credit
+ * budget, and retry-on-rate-limit handles any spikes.
  */
 const PRODUCT_BINS_QUERY = /* GraphQL */ `
   query GetSkuLocations($sku: String!) {
@@ -181,6 +177,16 @@ const PRODUCT_BINS_QUERY = /* GraphQL */ `
               inventory_bin
               warehouse {
                 identifier
+              }
+              locations(first: 50) {
+                edges {
+                  node {
+                    quantity
+                    location {
+                      name
+                    }
+                  }
+                }
               }
             }
           }
