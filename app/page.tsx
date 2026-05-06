@@ -238,6 +238,42 @@ export default function Home() {
     return clients.find((c) => c.id === selectedClient)?.companyName ?? selectedClient;
   }, [selectedClient, clients]);
 
+  // Debug helper
+  const [debugSku, setDebugSku] = useState("");
+  const [debugResult, setDebugResult] = useState<string | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const [debugCopied, setDebugCopied] = useState(false);
+
+  async function runDebug() {
+    if (!debugSku.trim()) return;
+    setDebugLoading(true);
+    setDebugResult(null);
+    setDebugCopied(false);
+    try {
+      const res = await fetch(`/api/debug/sku?sku=${encodeURIComponent(debugSku.trim())}`);
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        setDebugResult(JSON.stringify(json, null, 2));
+      } catch {
+        setDebugResult(text);
+      }
+    } catch (err) {
+      setDebugResult(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setDebugLoading(false);
+    }
+  }
+
+  async function copyDebug() {
+    if (!debugResult) return;
+    try {
+      await navigator.clipboard.writeText(debugResult);
+      setDebugCopied(true);
+      setTimeout(() => setDebugCopied(false), 2000);
+    } catch {}
+  }
+
   const globalTotals = useMemo(() => {
     if (!orders) return null;
     const uniqueSkus = new Set<string>();
@@ -350,6 +386,61 @@ export default function Home() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="card no-print">
+        <h2>Debug: inspect a single SKU</h2>
+        <p style={{ color: "#777", fontSize: 13, margin: "0 0 12px" }}>
+          Paste a SKU you know is in stock in Shiphero. Click Inspect to see exactly
+          what Shiphero returns. Then click Copy and share the result.
+        </p>
+        <div className="row">
+          <input
+            type="text"
+            value={debugSku}
+            onChange={(e) => setDebugSku(e.target.value)}
+            placeholder="e.g. SP25-ALLSTAR-MENS-SHORTS-STAR-M"
+            style={{
+              flex: 1,
+              minWidth: 280,
+              padding: "8px 10px",
+              border: "1px solid #ccc",
+              borderRadius: 6,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            }}
+          />
+          <button
+            className="primary"
+            onClick={runDebug}
+            disabled={!debugSku.trim() || debugLoading}
+          >
+            {debugLoading ? "Inspecting…" : "Inspect"}
+          </button>
+          {debugResult && (
+            <button className="secondary" onClick={copyDebug}>
+              {debugCopied ? "Copied!" : "Copy"}
+            </button>
+          )}
+        </div>
+        {debugResult && (
+          <pre
+            style={{
+              marginTop: 12,
+              padding: 12,
+              background: "#0e1116",
+              color: "#e6edf3",
+              borderRadius: 6,
+              fontSize: 12,
+              maxHeight: 400,
+              overflow: "auto",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}
+          >
+            {debugResult}
+          </pre>
+        )}
       </div>
 
       {orders &&
