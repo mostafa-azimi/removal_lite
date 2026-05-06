@@ -29,7 +29,7 @@ const QUERY = /* GraphQL */ `
     products(sku: $sku) {
       request_id
       complexity
-      data(first: 10) {
+      data(first: 1) {
         edges {
           node {
             id
@@ -42,17 +42,6 @@ const QUERY = /* GraphQL */ `
               inventory_bin
               warehouse {
                 identifier
-              }
-              locations {
-                edges {
-                  node {
-                    quantity
-                    location {
-                      id
-                      name
-                    }
-                  }
-                }
               }
             }
           }

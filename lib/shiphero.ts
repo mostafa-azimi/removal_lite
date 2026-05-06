@@ -49,7 +49,23 @@ async function getAccessToken(): Promise<string> {
   return cachedToken.token;
 }
 
-async function gql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+type ShipheroError = {
+  message: string;
+  code?: number;
+  time_remaining?: string;
+  required_credits?: number;
+  remaining_credits?: number;
+};
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function gql<T>(
+  query: string,
+  variables: Record<string, unknown>,
+  attempt = 0
+): Promise<T> {
   const token = await getAccessToken();
   const res = await fetch(GRAPHQL_URL, {
     method: "POST",
@@ -63,9 +79,31 @@ async function gql<T>(query: string, variables: Record<string, unknown>): Promis
     const text = await res.text();
     throw new Error(`Shiphero GraphQL HTTP ${res.status}: ${text}`);
   }
-  const json = (await res.json()) as { data?: T; errors?: Array<{ message: string }> };
+  const json = (await res.json()) as {
+    data?: T;
+    errors?: ShipheroError[];
+  };
+
+  // Handle rate-limit errors (code 30) with backoff.
+  const rateLimitErr = json.errors?.find((e) => e.code === 30);
+  if (rateLimitErr) {
+    if (attempt >= 5) {
+      throw new Error(
+        `Shiphero rate-limit retry exhausted: ${rateLimitErr.message}`
+      );
+    }
+    // Parse "X seconds" out of time_remaining; default 2s. Add jitter.
+    const m = rateLimitErr.time_remaining?.match(/(\d+)/);
+    const waitSecs = m ? Math.max(1, parseInt(m[1], 10)) : 2;
+    const waitMs = waitSecs * 1000 + 250 + Math.random() * 250;
+    await sleep(waitMs);
+    return gql<T>(query, variables, attempt + 1);
+  }
+
   if (json.errors && json.errors.length) {
-    throw new Error(`Shiphero GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`);
+    throw new Error(
+      `Shiphero GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`
+    );
   }
   if (!json.data) {
     throw new Error("Shiphero GraphQL response missing data");
@@ -116,59 +154,22 @@ type ProductsResponse = {
 };
 
 /**
- * Bin lookup by SKU. We deliberately don't pass customer_account_id here —
- * Shiphero's filter behaviour is finicky and silently returns 0 hits when
- * the type/format isn't exactly right. Since the 3PL operator's token can
- * see all products anyway, we look up by SKU alone and (optionally) filter
- * on the client side using the product's `account_id` field if provided.
+ * Bin lookup by SKU.
  *
- * `first: 10` because the same SKU can technically exist under multiple
- * customer accounts; we'll union all of their bins.
+ * We use the cheap, low-credit version of the query: one row per warehouse
+ * using the warehouse-level `inventory_bin` (the SKU's primary bin). We
+ * deliberately avoid the per-bin `locations` connection because that costs
+ * ~1011 credits per call vs ~10-20 for this version, and Shiphero's credit
+ * regenerates at 60/sec — the expensive query rate-limits us within seconds.
+ *
+ * Trade-off: SKUs split across multiple bins in the same warehouse will
+ * only show their primary bin. For the typical pick-list workflow this is
+ * acceptable.
  */
 const PRODUCT_BINS_QUERY = /* GraphQL */ `
   query GetSkuLocations($sku: String!) {
     products(sku: $sku) {
-      data(first: 10) {
-        edges {
-          node {
-            sku
-            name
-            account_id
-            warehouse_products {
-              warehouse_id
-              on_hand
-              inventory_bin
-              warehouse {
-                identifier
-              }
-              locations {
-                edges {
-                  node {
-                    quantity
-                    location {
-                      id
-                      name
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
-/**
- * Fallback query without the nested locations connection — some Shiphero accounts
- * don't expose `locations` on warehouse_products, in which case we use the single
- * `inventory_bin` field per warehouse.
- */
-const PRODUCT_BINS_QUERY_FALLBACK = /* GraphQL */ `
-  query GetSkuLocations($sku: String!) {
-    products(sku: $sku) {
-      data(first: 10) {
+      data(first: 1) {
         edges {
           node {
             sku
@@ -253,13 +254,7 @@ export async function fetchBinsForSku(
   customerAccountId?: string | null
 ): Promise<BinRow[]> {
   const variables = { sku };
-  let data: ProductsResponse;
-  try {
-    data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY, variables);
-  } catch (err) {
-    // If the locations connection isn't available, fall back to bin-only.
-    data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY_FALLBACK, variables);
-  }
+  const data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY, variables);
 
   const edges = data.products?.data?.edges ?? [];
   if (edges.length === 0) return [];

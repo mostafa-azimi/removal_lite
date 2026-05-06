@@ -19,8 +19,9 @@ export async function POST(req: NextRequest) {
   }
   const customerAccountId = body.customerAccountId?.trim() || null;
 
-  // Concurrency 8: Shiphero's complexity budget tolerates this comfortably.
-  const fetched = await fetchBinsForSkus(skus, customerAccountId, 8);
+  // Concurrency 3: each query is cheap (~10-20 credits), but Shiphero's bucket
+  // regenerates at 60/sec so this keeps us comfortably under the limit.
+  const fetched = await fetchBinsForSkus(skus, customerAccountId, 3);
 
   const bins: Record<string, unknown[]> = {};
   const errors: Record<string, string> = {};
