@@ -46,8 +46,11 @@ const QUERY = /* GraphQL */ `
               locations {
                 edges {
                   node {
-                    location_name
-                    on_hand
+                    quantity
+                    location {
+                      id
+                      name
+                    }
                   }
                 }
               }
@@ -100,8 +103,8 @@ export async function GET(req: NextRequest) {
             inventory_bin: wp.inventory_bin,
             locationsCount: wp.locations?.edges?.length ?? 0,
             locations: (wp.locations?.edges ?? []).map((le: any) => ({
-              location_name: le.node?.location_name,
-              on_hand: le.node?.on_hand,
+              bin: le.node?.location?.name,
+              quantity: le.node?.quantity,
             })),
           })),
         };

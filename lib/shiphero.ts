@@ -94,6 +94,7 @@ type ProductsResponse = {
         node: {
           sku: string;
           name: string | null;
+          account_id?: string | null;
           warehouse_products: Array<{
             warehouse_id: string | null;
             on_hand: number | null;
@@ -102,9 +103,8 @@ type ProductsResponse = {
             locations?: {
               edges: Array<{
                 node: {
-                  location_name: string | null;
-                  inventory_bin?: string | null;
-                  on_hand: number | null;
+                  quantity: number | null;
+                  location: { id: string | null; name: string | null } | null;
                 };
               }>;
             };
@@ -144,8 +144,11 @@ const PRODUCT_BINS_QUERY = /* GraphQL */ `
               locations {
                 edges {
                   node {
-                    location_name
-                    on_hand
+                    quantity
+                    location {
+                      id
+                      name
+                    }
                   }
                 }
               }
@@ -198,8 +201,8 @@ type ProductNode = {
     locations?: {
       edges: Array<{
         node: {
-          location_name: string | null;
-          on_hand: number | null;
+          quantity: number | null;
+          location: { id: string | null; name: string | null } | null;
         };
       }>;
     };
@@ -215,9 +218,9 @@ function buildBinRowsFromProduct(node: ProductNode): BinRow[] {
 
     if (locEdges.length > 0) {
       for (const le of locEdges) {
-        const bin = le.node.location_name?.trim();
+        const bin = le.node.location?.name?.trim();
         if (!bin) continue;
-        const onHand = le.node.on_hand ?? 0;
+        const onHand = le.node.quantity ?? 0;
         if (onHand <= 0) continue;
         rows.push({
           sku: node.sku,
