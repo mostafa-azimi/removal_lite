@@ -223,25 +223,15 @@ function buildBinRowsFromProduct(node: ProductNode): BinRow[] {
     const warehouseIdentifier = wp.warehouse?.identifier ?? null;
     const locEdges = wp.locations?.edges ?? [];
 
-    if (locEdges.length > 0) {
-      for (const le of locEdges) {
-        const bin = le.node.location?.name?.trim();
-        if (!bin) continue;
-        const onHand = le.node.quantity ?? 0;
-        if (onHand <= 0) continue;
-        rows.push({
-          sku: node.sku,
-          productName: node.name,
-          warehouseId,
-          warehouseIdentifier,
-          bin,
-          onHand,
-        });
-      }
-    } else {
-      const onHand = wp.on_hand ?? 0;
+    // Only emit rows with real per-bin data. We never fall back to the
+    // warehouse-level on_hand because it's been observed to overstate the
+    // actual pickable quantity (warehouse-level includes overflow, staging,
+    // etc.) — so the picker would walk to a bin and find too few units.
+    for (const le of locEdges) {
+      const bin = le.node.location?.name?.trim();
+      if (!bin) continue;
+      const onHand = le.node.quantity ?? 0;
       if (onHand <= 0) continue;
-      const bin = wp.inventory_bin?.trim() || "(no bin)";
       rows.push({
         sku: node.sku,
         productName: node.name,
