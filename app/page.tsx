@@ -2,6 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
+import {
+  ORDER_CREATE_REQUIRED_COLUMNS,
+  parseOrderCsvRows,
+  validateOrderDraft,
+  type OrderImportParseResult,
+} from "@/lib/order-import";
 
 type ClientAccount = { id: string; companyName: string; email: string | null };
 
@@ -24,9 +30,35 @@ type PicklistRow = BinRow & { needed: number };
 
 type OrderResult = {
   orderNumber: string;
+  sourceOrderId?: string | null;
   rows: PicklistRow[];
   missing: Array<{ sku: string; needed: number; reason: string }>;
   totals: { uniqueSkus: number; totalQty: number };
+};
+
+type CreateOrdersApiResponse = {
+  summary: {
+    dryRun: boolean;
+    total: number;
+    ready: number;
+    created: number;
+    invalid: number;
+    failed: number;
+  };
+  results: Array<{
+    orderNumber: string;
+    status: "ready" | "created" | "invalid" | "failed";
+    lineItems: number;
+    units: number;
+    orderId?: string | null;
+    legacyId?: number | string | null;
+    requestId?: string | null;
+    complexity?: number | null;
+    pickListStatus?: "ready" | "failed";
+    pickLines?: number;
+    message?: string;
+  }>;
+  pickOrders?: OrderResult[];
 };
 
 // Only three columns matter from the CSV.
@@ -40,6 +72,20 @@ const BATCH_SIZE = 40;
 // Natural alphanumeric collator for bin sorting.
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
+function parseLocationPrefixes(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split(/[,\n]/)
+    .map((prefix) => prefix.trim())
+    .filter(Boolean)
+    .filter((prefix) => {
+      const key = prefix.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 export default function Home() {
   const [clients, setClients] = useState<ClientAccount[] | null>(null);
   const [clientsError, setClientsError] = useState<string | null>(null);
@@ -52,6 +98,21 @@ export default function Home() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [orders, setOrders] = useState<OrderResult[] | null>(null);
   const [generatedAt, setGeneratedAt] = useState<string>("");
+  const [orderImport, setOrderImport] = useState<OrderImportParseResult | null>(null);
+  const [tokenKind, setTokenKind] = useState<"env" | "refresh" | "access">("env");
+  const [tokenValue, setTokenValue] = useState("");
+  const [orderDryRun, setOrderDryRun] = useState(true);
+  const [confirmCreate, setConfirmCreate] = useState(false);
+  const [createLoading, setCreateLoading] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createResult, setCreateResult] = useState<CreateOrdersApiResponse | null>(null);
+  const [defaultShopName, setDefaultShopName] = useState("Manual Order");
+  const [defaultStatus, setDefaultStatus] = useState("pending");
+  const [defaultCurrency, setDefaultCurrency] = useState("USD");
+  const [defaultTags, setDefaultTags] = useState("csv-import");
+  const [skipAddressValidation, setSkipAddressValidation] = useState(false);
+  const [ignoreAddressValidationErrors, setIgnoreAddressValidationErrors] = useState(false);
+  const [locationPrefixInput, setLocationPrefixInput] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -82,10 +143,16 @@ export default function Home() {
     setCsvWarning(null);
     setSubmitError(null);
     setOrders(null);
+    setOrderImport(null);
+    setCreateError(null);
+    setCreateResult(null);
+    setConfirmCreate(false);
     Papa.parse<Record<string, string>>(file, {
       header: true,
       skipEmptyLines: true,
       complete: (parsed) => {
+        const importResult = parseOrderCsvRows(parsed.data);
+        setOrderImport(importResult);
         const headers = parsed.meta.fields || [];
         const hasSku = headers.includes(SKU_HEADER);
         const hasQty = headers.includes(QTY_HEADER);
@@ -123,6 +190,59 @@ export default function Home() {
         setCsvLines(null);
       },
     });
+  }
+
+  async function submitOrderCreate() {
+    if (!orderImport || orderImport.orders.length === 0) return;
+    setCreateLoading(true);
+    setCreateError(null);
+    setCreateResult(null);
+    if (!orderDryRun) {
+      setOrders(null);
+      setGeneratedAt("");
+    }
+
+    const auth =
+      tokenKind === "env"
+        ? null
+        : tokenKind === "refresh"
+          ? { refreshToken: tokenValue.trim() }
+          : { accessToken: tokenValue.trim() };
+
+    try {
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orders: orderImport.orders,
+          customerAccountId: selectedClient || null,
+          auth,
+          dryRun: orderDryRun,
+          confirmed: !orderDryRun && confirmCreate,
+          defaults: {
+            shopName: defaultShopName,
+            fulfillmentStatus: defaultStatus,
+            currency: defaultCurrency,
+            tags: defaultTags,
+            skipAddressValidation,
+            ignoreAddressValidationErrors,
+          },
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || `Order import failed (${res.status})`);
+      }
+      setCreateResult(json);
+      if (!json.summary?.dryRun && Array.isArray(json.pickOrders) && json.pickOrders.length > 0) {
+        setOrders(json.pickOrders);
+        setGeneratedAt(new Date().toLocaleString());
+      }
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreateLoading(false);
+    }
   }
 
   async function generate() {
@@ -286,6 +406,44 @@ export default function Home() {
     return { orders: orders.length, uniqueSkus: uniqueSkus.size, totalQty };
   }, [orders]);
 
+  const importStats = useMemo(() => {
+    if (!orderImport) return null;
+    let valid = 0;
+    let invalid = 0;
+    let units = 0;
+    let lineItems = 0;
+    for (const order of orderImport.orders) {
+      const errors = validateOrderDraft(order);
+      if (errors.length > 0) invalid += 1;
+      else valid += 1;
+      lineItems += order.lineItems.length;
+      units += order.lineItems.reduce((sum, line) => sum + line.quantity, 0);
+    }
+    return {
+      orders: orderImport.orders.length,
+      valid,
+      invalid,
+      lineItems,
+      units,
+    };
+  }, [orderImport]);
+
+  const invalidPreview = useMemo(() => {
+    if (!orderImport) return [];
+    return orderImport.orders
+      .map((order) => ({
+        orderNumber: order.orderNumber,
+        errors: validateOrderDraft(order),
+      }))
+      .filter((order) => order.errors.length > 0)
+      .slice(0, 5);
+  }, [orderImport]);
+
+  const locationPrefixes = useMemo(
+    () => parseLocationPrefixes(locationPrefixInput),
+    [locationPrefixInput]
+  );
+
   return (
     <main className="screen">
       <div className="no-print">
@@ -348,6 +506,21 @@ export default function Home() {
 
         <div className="card">
           <h2>3. Generate</h2>
+          <div className="field-grid compact">
+            <label className="wide">
+              Location prefixes
+              <input
+                type="text"
+                value={locationPrefixInput}
+                onChange={(e) => setLocationPrefixInput(e.target.value)}
+                placeholder="A, B, A-1"
+              />
+            </label>
+          </div>
+          <p style={{ color: "#777", fontSize: 12, margin: "8px 0 12px" }}>
+            Optional. Prefixes split the printed list by bin start, so <code>A</code> matches aisle A and{" "}
+            <code>A-1</code> matches the longer prefix.
+          </p>
           <div className="row">
             <button
               className="primary"
@@ -383,6 +556,228 @@ export default function Home() {
             <div className="banner info" style={{ marginTop: 12 }}>
               {globalTotals.orders} order{globalTotals.orders === 1 ? "" : "s"} · {globalTotals.uniqueSkus}{" "}
               unique SKUs · {globalTotals.totalQty} units
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <h2>4. Create ShipHero orders</h2>
+
+          {importStats ? (
+            <div className="banner info">
+              {importStats.orders} order{importStats.orders === 1 ? "" : "s"} parsed ·{" "}
+              {importStats.valid} ready · {importStats.invalid} need attention ·{" "}
+              {importStats.lineItems} line item{importStats.lineItems === 1 ? "" : "s"} ·{" "}
+              {importStats.units} units
+            </div>
+          ) : (
+            <div className="banner warn">Upload a CSV before creating orders.</div>
+          )}
+
+          {orderImport?.skippedRows.length ? (
+            <div className="banner warn">
+              {orderImport.skippedRows.length} row
+              {orderImport.skippedRows.length === 1 ? "" : "s"} skipped. First issue: row{" "}
+              {orderImport.skippedRows[0].row} — {orderImport.skippedRows[0].reason}.
+            </div>
+          ) : null}
+
+          {invalidPreview.length > 0 && (
+            <div className="banner warn">
+              {invalidPreview.map((order) => (
+                <div key={order.orderNumber}>
+                  <strong>{order.orderNumber}</strong>: {order.errors.join("; ")}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <details className="csv-columns">
+            <summary>CSV columns used for order creation</summary>
+            <div className="columns-list">
+              {ORDER_CREATE_REQUIRED_COLUMNS.map((column) => (
+                <code key={column}>{column}</code>
+              ))}
+            </div>
+          </details>
+
+          <div className="field-grid">
+            <label>
+              Token
+              <select value={tokenKind} onChange={(e) => setTokenKind(e.target.value as typeof tokenKind)}>
+                <option value="env">Use server token</option>
+                <option value="refresh">Refresh token</option>
+                <option value="access">Access token</option>
+              </select>
+            </label>
+
+            {tokenKind !== "env" && (
+              <label className="wide">
+                ShipHero token
+                <input
+                  type="password"
+                  value={tokenValue}
+                  onChange={(e) => setTokenValue(e.target.value)}
+                  placeholder={tokenKind === "refresh" ? "Refresh token" : "Access token"}
+                />
+              </label>
+            )}
+
+            <label>
+              Shop name
+              <input
+                type="text"
+                value={defaultShopName}
+                onChange={(e) => setDefaultShopName(e.target.value)}
+              />
+            </label>
+
+            <label>
+              Status
+              <input
+                type="text"
+                value={defaultStatus}
+                onChange={(e) => setDefaultStatus(e.target.value)}
+              />
+            </label>
+
+            <label>
+              Currency
+              <input
+                type="text"
+                value={defaultCurrency}
+                onChange={(e) => setDefaultCurrency(e.target.value.toUpperCase())}
+              />
+            </label>
+
+            <label>
+              Tags
+              <input
+                type="text"
+                value={defaultTags}
+                onChange={(e) => setDefaultTags(e.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="check-row">
+            <label>
+              <input
+                type="checkbox"
+                checked={orderDryRun}
+                onChange={(e) => {
+                  setOrderDryRun(e.target.checked);
+                  setConfirmCreate(false);
+                }}
+              />
+              Dry run
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={skipAddressValidation}
+                onChange={(e) => setSkipAddressValidation(e.target.checked)}
+              />
+              Skip address validation
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={ignoreAddressValidationErrors}
+                onChange={(e) => setIgnoreAddressValidationErrors(e.target.checked)}
+              />
+              Ignore address validation errors
+            </label>
+          </div>
+
+          {!orderDryRun && (
+            <label className="confirm-row">
+              <input
+                type="checkbox"
+                checked={confirmCreate}
+                onChange={(e) => setConfirmCreate(e.target.checked)}
+              />
+              I understand this will create live orders in ShipHero.
+            </label>
+          )}
+
+          <div className="row" style={{ marginTop: 12 }}>
+            <button
+              className="primary"
+              onClick={submitOrderCreate}
+              disabled={
+                createLoading ||
+                !orderImport ||
+                orderImport.orders.length === 0 ||
+                (tokenKind !== "env" && !tokenValue.trim()) ||
+                (!orderDryRun && !confirmCreate)
+              }
+            >
+              {createLoading
+                ? orderDryRun
+                  ? "Checking orders…"
+                  : "Creating orders…"
+                : orderDryRun
+                  ? "Dry run"
+                  : "Create orders"}
+            </button>
+          </div>
+
+          {createError && (
+            <div className="banner error" style={{ marginTop: 12 }}>
+              {createError}
+            </div>
+          )}
+
+          {createResult && (
+            <div className="import-results">
+              <div className="banner info">
+                {createResult.summary.dryRun ? "Dry run complete" : "Import complete"} ·{" "}
+                {createResult.summary.created} created · {createResult.summary.ready} ready ·{" "}
+                {createResult.summary.invalid} invalid · {createResult.summary.failed} failed
+                {createResult.pickOrders?.length
+                  ? ` · ${createResult.pickOrders.length} pick list${createResult.pickOrders.length === 1 ? "" : "s"} ready`
+                  : ""}
+              </div>
+              <table className="import-table">
+                <thead>
+                  <tr>
+                    <th>Order</th>
+                    <th>Status</th>
+                    <th>Lines</th>
+                    <th>Units</th>
+                    <th>Pick list</th>
+                    <th>ShipHero ID / Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {createResult.results.map((result) => (
+                    <tr key={`${result.orderNumber}-${result.status}-${result.orderId ?? ""}`}>
+                      <td className="sku">{result.orderNumber}</td>
+                      <td>
+                        <span className={`status-pill ${result.status}`}>{result.status}</span>
+                      </td>
+                      <td className="qty">{result.lineItems}</td>
+                      <td className="qty">{result.units}</td>
+                      <td>
+                        {result.pickListStatus ? (
+                          <span className={`status-pill ${result.pickListStatus}`}>
+                            {result.pickListStatus}
+                            {result.pickLines != null ? ` (${result.pickLines})` : ""}
+                          </span>
+                        ) : (
+                          ""
+                        )}
+                      </td>
+                      <td>
+                        {result.orderId || result.legacyId
+                          ? `${result.orderId ?? ""}${result.legacyId ? ` (${result.legacyId})` : ""}`
+                          : result.message}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
@@ -451,6 +846,7 @@ export default function Home() {
             isFirst={idx === 0}
             clientName={selectedClientName}
             generatedAt={generatedAt}
+            locationPrefixes={locationPrefixes}
           />
         ))}
     </main>
@@ -462,24 +858,51 @@ function OrderSection({
   isFirst,
   clientName,
   generatedAt,
+  locationPrefixes,
 }: {
   order: OrderResult;
   isFirst: boolean;
   clientName: string;
   generatedAt: string;
+  locationPrefixes: string[];
 }) {
   const grouped = useMemo(() => {
-    const groups = new Map<string, PicklistRow[]>();
-    for (const r of order.rows) {
-      const key = r.warehouseIdentifier || r.warehouseId || "Warehouse";
-      const arr = groups.get(key) ?? [];
-      arr.push(r);
-      groups.set(key, arr);
+    const prefixGroups = new Map<string, PicklistRow[]>();
+    const prefixes = [...locationPrefixes].sort((a, b) => b.length - a.length);
+
+    if (prefixes.length === 0) {
+      prefixGroups.set("", order.rows);
+    } else {
+      for (const prefix of prefixes) prefixGroups.set(prefix, []);
+      prefixGroups.set("Other locations", []);
+
+      for (const row of order.rows) {
+        const matched = prefixes.find((prefix) =>
+          row.bin.toLowerCase().startsWith(prefix.toLowerCase())
+        );
+        const key = matched ?? "Other locations";
+        prefixGroups.get(key)!.push(row);
+      }
     }
-    return [...groups.entries()].sort(([a], [b]) =>
-      a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
-    );
-  }, [order.rows]);
+
+    return [...prefixGroups.entries()]
+      .filter(([, rows]) => rows.length > 0)
+      .map(([prefix, rows]) => {
+        const warehouses = new Map<string, PicklistRow[]>();
+        for (const row of rows) {
+          const key = row.warehouseIdentifier || row.warehouseId || "Warehouse";
+          const arr = warehouses.get(key) ?? [];
+          arr.push(row);
+          warehouses.set(key, arr);
+        }
+        return {
+          prefix,
+          warehouses: [...warehouses.entries()].sort(([a], [b]) =>
+            a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
+          ),
+        };
+      });
+  }, [order.rows, locationPrefixes]);
 
   return (
     <section className={`picklist order-page${isFirst ? "" : " page-break"}`}>
@@ -507,6 +930,12 @@ function OrderSection({
           <span className="label">Pick lines</span>
           {order.rows.length}
         </div>
+        {locationPrefixes.length > 0 && (
+          <div>
+            <span className="label">Location prefixes</span>
+            {locationPrefixes.join(", ")}
+          </div>
+        )}
       </div>
 
       {grouped.length === 0 && (
@@ -515,37 +944,42 @@ function OrderSection({
         </div>
       )}
 
-      {grouped.map(([warehouse, rows]) => (
-        <div key={warehouse} className="warehouse-section">
-          <h3>Warehouse: {warehouse}</h3>
-          <table className="pick">
-            <thead>
-              <tr>
-                <th style={{ width: 32 }}>✓</th>
-                <th style={{ width: "22%" }}>Bin</th>
-                <th style={{ width: "28%" }}>SKU</th>
-                <th>Product</th>
-                <th style={{ width: "10%", textAlign: "right" }}>On hand</th>
-                <th style={{ width: "12%", textAlign: "right" }}>Pick qty</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={`${r.bin}-${r.sku}-${i}`}>
-                  <td className="checkbox">
-                    <span className="box" />
-                  </td>
-                  <td className="bin">{r.bin}</td>
-                  <td className="sku">{r.sku}</td>
-                  <td>{r.productName || ""}</td>
-                  <td className="qty" style={{ color: "#666", fontWeight: 500 }}>
-                    {r.onHand}
-                  </td>
-                  <td className="qty">{r.needed}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {grouped.map((group) => (
+        <div key={group.prefix || "all"} className="prefix-section">
+          {group.prefix && <h3>Location prefix: {group.prefix}</h3>}
+          {group.warehouses.map(([warehouse, rows]) => (
+            <div key={`${group.prefix}-${warehouse}`} className="warehouse-section">
+              <h4>Warehouse: {warehouse}</h4>
+              <table className="pick">
+                <thead>
+                  <tr>
+                    <th style={{ width: 32 }}>✓</th>
+                    <th style={{ width: "22%" }}>Bin</th>
+                    <th style={{ width: "28%" }}>SKU</th>
+                    <th>Product</th>
+                    <th style={{ width: "10%", textAlign: "right" }}>On hand</th>
+                    <th style={{ width: "12%", textAlign: "right" }}>Pick qty</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={`${r.bin}-${r.sku}-${i}`}>
+                      <td className="checkbox">
+                        <span className="box" />
+                      </td>
+                      <td className="bin">{r.bin}</td>
+                      <td className="sku">{r.sku}</td>
+                      <td>{r.productName || ""}</td>
+                      <td className="qty" style={{ color: "#666", fontWeight: 500 }}>
+                        {r.onHand}
+                      </td>
+                      <td className="qty">{r.needed}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
         </div>
       ))}
 
