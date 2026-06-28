@@ -18,18 +18,15 @@ const REFRESH_URL = "https://public-api.shiphero.com/auth/refresh";
 type CachedToken = { token: string; expiresAt: number };
 let cachedToken: CachedToken | null = null;
 
-async function getAccessToken(): Promise<string> {
-  const now = Date.now();
-  if (cachedToken && cachedToken.expiresAt - 60_000 > now) {
-    return cachedToken.token;
-  }
-  const refreshToken = process.env.SHIPHERO_REFRESH_TOKEN;
-  if (!refreshToken) {
-    throw new Error(
-      "Missing SHIPHERO_REFRESH_TOKEN environment variable. Set it in Vercel project settings."
-    );
-  }
+export type ShipHeroAuthOverride = {
+  accessToken?: string | null;
+  refreshToken?: string | null;
+};
 
+async function refreshAccessToken(refreshToken: string): Promise<{
+  access_token: string;
+  expires_in?: number;
+}> {
   const res = await fetch(REFRESH_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -43,6 +40,30 @@ async function getAccessToken(): Promise<string> {
   if (!data.access_token) {
     throw new Error("Shiphero refresh response missing access_token");
   }
+  return data;
+}
+
+async function getAccessToken(auth?: ShipHeroAuthOverride): Promise<string> {
+  const accessToken = auth?.accessToken?.trim();
+  if (accessToken) return accessToken;
+
+  const overrideRefreshToken = auth?.refreshToken?.trim();
+  if (overrideRefreshToken) {
+    return (await refreshAccessToken(overrideRefreshToken)).access_token;
+  }
+
+  const now = Date.now();
+  if (cachedToken && cachedToken.expiresAt - 60_000 > now) {
+    return cachedToken.token;
+  }
+  const refreshToken = process.env.SHIPHERO_REFRESH_TOKEN;
+  if (!refreshToken) {
+    throw new Error(
+      "Missing SHIPHERO_REFRESH_TOKEN environment variable. Set it in Vercel project settings."
+    );
+  }
+
+  const data = await refreshAccessToken(refreshToken);
   // Default ~28 days; play it safe with 6h if the API doesn't report.
   const ttlMs = (data.expires_in ?? 6 * 3600) * 1000;
   cachedToken = { token: data.access_token, expiresAt: now + ttlMs };
@@ -64,9 +85,10 @@ function sleep(ms: number) {
 async function gql<T>(
   query: string,
   variables: Record<string, unknown>,
-  attempt = 0
+  attempt = 0,
+  auth?: ShipHeroAuthOverride
 ): Promise<T> {
-  const token = await getAccessToken();
+  const token = await getAccessToken(auth);
   const res = await fetch(GRAPHQL_URL, {
     method: "POST",
     headers: {
@@ -97,7 +119,7 @@ async function gql<T>(
     const waitSecs = m ? Math.max(1, parseInt(m[1], 10)) : 2;
     const waitMs = waitSecs * 1000 + 250 + Math.random() * 250;
     await sleep(waitMs);
-    return gql<T>(query, variables, attempt + 1);
+    return gql<T>(query, variables, attempt + 1, auth);
   }
 
   if (json.errors && json.errors.length) {
@@ -158,14 +180,13 @@ type ProductsResponse = {
  *
  * Shiphero stores the actual bin code in the `locations` connection on each
  * warehouse_product (the `inventory_bin` field comes back as whitespace in
- * many accounts). We query locations(first: 50) — at this size and with
- * products(first: 1) the total complexity is well under the 4004-credit
- * budget, and retry-on-rate-limit handles any spikes.
+ * many accounts). We query a small product set so 3PL accounts with duplicate
+ * SKUs across clients can still be filtered by `account_id`.
  */
 const PRODUCT_BINS_QUERY = /* GraphQL */ `
   query GetSkuLocations($sku: String!) {
     products(sku: $sku) {
-      data(first: 1) {
+      data(first: 10) {
         edges {
           node {
             sku
@@ -247,10 +268,11 @@ function buildBinRowsFromProduct(node: ProductNode): BinRow[] {
 
 export async function fetchBinsForSku(
   sku: string,
-  customerAccountId?: string | null
+  customerAccountId?: string | null,
+  auth?: ShipHeroAuthOverride
 ): Promise<BinRow[]> {
   const variables = { sku };
-  const data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY, variables);
+  const data = await gql<ProductsResponse>(PRODUCT_BINS_QUERY, variables, 0, auth);
 
   const edges = data.products?.data?.edges ?? [];
   if (edges.length === 0) return [];
@@ -279,7 +301,8 @@ export async function fetchBinsForSku(
 export async function fetchBinsForSkus(
   skus: string[],
   customerAccountId?: string | null,
-  concurrency = 4
+  concurrency = 4,
+  auth?: ShipHeroAuthOverride
 ): Promise<Record<string, { rows: BinRow[]; error?: string }>> {
   const result: Record<string, { rows: BinRow[]; error?: string }> = {};
   const queue = [...new Set(skus)];
@@ -289,7 +312,7 @@ export async function fetchBinsForSkus(
       const sku = queue.shift();
       if (!sku) return;
       try {
-        const rows = await fetchBinsForSku(sku, customerAccountId);
+        const rows = await fetchBinsForSku(sku, customerAccountId, auth);
         result[sku] = { rows };
       } catch (err) {
         result[sku] = {
@@ -494,4 +517,240 @@ export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
     a.companyName.localeCompare(b.companyName, undefined, { sensitivity: "base" })
   );
   return accounts;
+}
+
+export type CreateOrderAddressInput = {
+  first_name?: string;
+  last_name?: string;
+  company?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  country?: string;
+  email?: string;
+  phone?: string;
+};
+
+export type CreateLineItemInput = {
+  sku: string;
+  partner_line_item_id: string;
+  quantity: number;
+  price: string;
+  product_name?: string;
+  warehouse_id?: string;
+};
+
+export type CreateOrderInput = {
+  customer_account_id?: string;
+  order_number: string;
+  partner_order_id?: string;
+  shop_name?: string;
+  fulfillment_status?: string;
+  order_date?: string;
+  currency?: string;
+  email?: string;
+  tags?: string[];
+  gift_note?: string;
+  packing_note?: string;
+  shipping_address: CreateOrderAddressInput;
+  billing_address?: CreateOrderAddressInput;
+  shipping_lines?: {
+    title: string;
+    price: string;
+    carrier?: string;
+    method?: string;
+  };
+  line_items: CreateLineItemInput[];
+  skip_address_validation?: boolean;
+  ignore_address_validation_errors?: boolean;
+  allow_partial?: boolean;
+  allow_split?: boolean;
+};
+
+export type CreateOrderResponse = {
+  order_create: {
+    request_id: string | null;
+    complexity: number | null;
+    order: {
+      id: string | null;
+      legacy_id: number | string | null;
+      order_number: string | null;
+      fulfillment_status: string | null;
+      order_date: string | null;
+      account_id: string | null;
+      line_items: {
+        edges: Array<{
+          node: {
+            id: string | null;
+            sku: string | null;
+            quantity: number | null;
+            product_name: string | null;
+          };
+        }>;
+      } | null;
+    } | null;
+  };
+};
+
+export type ShipHeroOrderLine = {
+  id: string | null;
+  sku: string;
+  quantity: number;
+  productName: string | null;
+};
+
+export type ShipHeroOrderForPickList = {
+  id: string;
+  orderNumber: string;
+  requestId: string | null;
+  complexity: number | null;
+  lineItems: ShipHeroOrderLine[];
+};
+
+type OrderLineItemsResponse = {
+  order: {
+    request_id: string | null;
+    complexity: number | null;
+    data: {
+      id: string | null;
+      order_number: string | null;
+      line_items: {
+        edges: Array<{
+          node: {
+            id: string | null;
+            sku: string | null;
+            quantity: number | null;
+            product_name: string | null;
+          };
+        }>;
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      } | null;
+    } | null;
+  };
+};
+
+const ORDER_LINE_ITEMS_QUERY = /* GraphQL */ `
+  query GetOrderLineItems($id: String!, $cursor: String) {
+    order(id: $id) {
+      request_id
+      complexity
+      data {
+        id
+        order_number
+        line_items(first: 100, after: $cursor) {
+          edges {
+            node {
+              id
+              sku
+              quantity
+              product_name
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+`;
+
+const ORDER_CREATE_MUTATION = /* GraphQL */ `
+  mutation CreateOrder($data: CreateOrderInput!) {
+    order_create(data: $data) {
+      request_id
+      complexity
+      order {
+        id
+        legacy_id
+        order_number
+        fulfillment_status
+        order_date
+        account_id
+        line_items(first: 50) {
+          edges {
+            node {
+              id
+              sku
+              quantity
+              product_name
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export async function createShipHeroOrder(
+  data: CreateOrderInput,
+  auth?: ShipHeroAuthOverride
+): Promise<CreateOrderResponse["order_create"]> {
+  const response = await gql<CreateOrderResponse>(
+    ORDER_CREATE_MUTATION,
+    { data },
+    0,
+    auth
+  );
+  if (!response.order_create?.order) {
+    throw new Error("Shiphero order_create response did not include an order");
+  }
+  return response.order_create;
+}
+
+export async function fetchOrderForPickList(
+  orderId: string,
+  auth?: ShipHeroAuthOverride
+): Promise<ShipHeroOrderForPickList> {
+  const lineItems: ShipHeroOrderLine[] = [];
+  let cursor: string | null = null;
+  let orderNumber = orderId;
+  let requestId: string | null = null;
+  let complexity: number | null = null;
+
+  for (let i = 0; i < 50; i++) {
+    const response: OrderLineItemsResponse = await gql<OrderLineItemsResponse>(
+      ORDER_LINE_ITEMS_QUERY,
+      { id: orderId, cursor },
+      0,
+      auth
+    );
+    const payload = response.order;
+    const order = payload?.data;
+    if (!order?.id) {
+      throw new Error(`Shiphero order lookup returned no order for ${orderId}`);
+    }
+    requestId = payload.request_id;
+    complexity = (complexity ?? 0) + (payload.complexity ?? 0);
+    orderNumber = order.order_number || orderId;
+
+    const conn = order.line_items;
+    for (const edge of conn?.edges ?? []) {
+      const node = edge.node;
+      const sku = node.sku?.trim();
+      const quantity = node.quantity ?? 0;
+      if (!sku || quantity <= 0) continue;
+      lineItems.push({
+        id: node.id,
+        sku,
+        quantity,
+        productName: node.product_name,
+      });
+    }
+
+    if (!conn?.pageInfo?.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+    if (!cursor) break;
+  }
+
+  return {
+    id: orderId,
+    orderNumber,
+    requestId,
+    complexity,
+    lineItems,
+  };
 }

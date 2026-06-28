@@ -1,9 +1,13 @@
-# Shiphero Pick List
+# Shiphero Pick List + Order Import
 
 A small Next.js app that takes a Shiphero order-upload CSV, calls the Shiphero
 GraphQL API to look up every bin location for every SKU on the order, and
 prints a clean, paper-friendly pick list sorted by warehouse → bin
 (alphanumerically) so you minimise your walking path.
+
+It can also parse a CSV into ShipHero `order_create` payloads, run a dry-run
+validation, create live ShipHero orders after an explicit confirmation, then
+build the printable pick list from the created ShipHero order line items.
 
 ## What it does
 
@@ -16,6 +20,12 @@ prints a clean, paper-friendly pick list sorted by warehouse → bin
 5. The result is rendered as a print-optimised page — letter (8.5" × 11"),
    half-inch margins, big checkboxes next to every line, page-break-aware.
    Hit **Print** (or ⌘P / Ctrl-P) and you've got your paper pick list.
+6. Optionally dry-run the parsed orders, then create them in ShipHero with the
+   selected customer account.
+7. After live creation, it fetches each created order's line items from
+   ShipHero and prepares pick lists from those order records.
+8. Optional location prefixes split the printed pick list by bin prefix, such
+   as `A`, `B`, or `A-1`.
 
 ## Output columns
 
@@ -59,7 +69,10 @@ git push -u origin main
 2. Pick the client from the dropdown.
 3. Upload the order CSV.
 4. Click **Generate pick list**.
-5. Click **Print**.
+5. Use **Dry run** in the order creation section to validate the upload.
+6. To create live orders, uncheck **Dry run**, confirm, and click **Create orders**.
+7. The app will fetch the created ShipHero order lines and prepare pick lists.
+8. Click **Print** if you also need paper pick lists.
 
 ## Local development
 
@@ -82,7 +95,7 @@ No user-facing login. Anyone who can hit the deployed URL can use your
 Shiphero account, so make sure the URL is private (Vercel's free password
 protection or a basic auth middleware are easy adds if you need them).
 
-## CSV format
+## CSV format for pick lists
 
 The app expects the standard Shiphero order-upload template. Specifically,
 it reads these columns:
@@ -95,6 +108,54 @@ it reads these columns:
 
 Other columns are ignored.
 
+## CSV format for order creation
+
+Order creation requires enough data to build ShipHero's `CreateOrderInput`.
+The parser accepts common variants of these headers:
+
+- `Order Number (Required)`
+- `Product Sku (Required)`
+- `Quantity`
+- `Shipping Address 1` or `Address 1`
+- `Shipping City` or `City`
+- `Shipping State` or `State`
+- `Shipping Zip` or `Zip`
+- `Shipping Country` or `Country`
+
+Optional fields include customer name, email, phone, product name, price, shop
+name, order date, fulfillment status, tags, shipping carrier/method/price, and
+billing address fields. If line item price is missing, the app sends `0.00`.
+If country is missing, it defaults to `US`. ShipHero requires a unique
+`partner_line_item_id`; when the CSV does not provide one, the app derives one
+from the order number and row order.
+
+## Testing order creation
+
+Dry-run mode never calls ShipHero's mutation. It validates the parsed payloads
+and reports which orders are ready or invalid.
+
+For live creation, use either:
+
+- `SHIPHERO_REFRESH_TOKEN` in `.env.local` / Vercel environment variables, or
+- a refresh token or access token entered in the page for one test run.
+
+ShipHero's public API does not use an API key for this flow. It uses bearer
+access tokens, usually refreshed from a long-lived refresh token.
+
+## Location prefix breakdown
+
+Use the **Location prefixes** field before printing to split the pick list by
+bin prefix. Enter one or more comma-separated prefixes:
+
+```text
+A, B, A-1
+```
+
+Each value is treated as a literal prefix. A one-character value like `A`
+matches bins that start with `A`; a longer value like `A-1` matches bins that
+start with `A-1`. If prefixes overlap, the longer prefix is matched first so
+the more specific group wins. Unmatched bins appear under **Other locations**.
+
 ## Troubleshooting
 
 **"Couldn't load clients"** — `SHIPHERO_REFRESH_TOKEN` isn't set, or the
@@ -106,6 +167,10 @@ selected client (3PLs sometimes have the same SKU under multiple clients).
 
 **Some SKUs missing from the printed list** — they'll appear in the
 "Could not locate" section at the bottom of the printout, with the reason.
+
+**Live order created but no pick list appeared** — the order was created, but
+the follow-up order or bin lookup failed. Check the message in the import
+results; it will include the ShipHero/API error.
 
 **Order is huge and the request times out** — Vercel's serverless function
 timeout for hobby plans is 10s, pro is 60s (which the route is configured
@@ -121,8 +186,10 @@ app/
   globals.css             # Screen + print CSS (8.5×11)
   api/
     clients/route.ts      # GET /api/clients — list 3PL clients
+    orders/route.ts       # POST /api/orders — dry-run or create ShipHero orders
     picklist/route.ts     # POST /api/picklist — generate pick list
 lib/
+  order-import.ts         # CSV parsing + order import validation
   shiphero.ts             # Token refresh + GraphQL queries
   sort.ts                 # Natural alphanumeric sort for bin codes
 .env.example              # SHIPHERO_REFRESH_TOKEN
