@@ -2,8 +2,8 @@
 
 A small Next.js app that takes a Shiphero order-upload CSV, calls the Shiphero
 GraphQL API to look up every bin location for every SKU on the order, and
-prints a clean, paper-friendly pick list sorted by warehouse → bin
-(alphanumerically) so you minimise your walking path.
+prints a clean, paper-friendly pick list with sortable bin-level pick
+quantities so you can validate and pick from the same upload.
 
 It can also parse a CSV into ShipHero `order_create` payloads, run a dry-run
 validation, create live ShipHero orders after an explicit confirmation, then
@@ -15,26 +15,29 @@ build the printable pick list from the created ShipHero order line items.
 2. You upload an order CSV (the standard Shiphero order-upload template).
 3. For each SKU on the order, the app asks Shiphero for every bin location
    that has on-hand inventory **greater than zero** for the selected client.
-4. It groups the result by warehouse, then sorts by bin location using a
-   natural alphanumeric sort (so `A-1-2` comes before `A-1-10`).
-5. The result is rendered as a print-optimised page — letter (8.5" × 11"),
+4. It allocates the needed quantity across the available bins for each SKU.
+5. It can sort the printed pick list by location route, SKU, product, pick
+   quantity, or low on-hand quantity.
+6. The result is rendered as a print-optimised page — letter (8.5" × 11"),
    half-inch margins, big checkboxes next to every line, page-break-aware.
    Hit **Print** (or ⌘P / Ctrl-P) and you've got your paper pick list.
-6. Optionally dry-run the parsed orders, then create them in ShipHero with the
+7. Optionally dry-run the parsed orders, then create them in ShipHero with the
    selected customer account.
-7. After live creation, it fetches each created order's line items from
+8. After live creation, it fetches each created order's line items from
    ShipHero and prepares pick lists from those order records.
-8. Optional location prefixes split the printed pick list by bin prefix, such
+9. Optional location prefixes split the printed pick list by bin prefix, such
    as `A`, `B`, or `A-1`.
 
 ## Output columns
 
-| ☐ | Bin | SKU | Product | On hand | Pick qty |
-|---|-----|-----|---------|---------|----------|
+| ☐ | Bin | SKU | Product | On hand | Needed | Pick |
+|---|-----|-----|---------|---------|--------|------|
 
 The on-hand column is informational so the picker can see if a bin is close
-to being emptied. The pick-qty column is the total number of units needed
-across every order in the uploaded CSV (SKUs are aggregated across orders).
+to being emptied. The needed column is the order quantity for that SKU. The
+pick column is the amount to pull from that specific bin. If the selected
+bins do not cover the full need, the remaining shortage appears in the
+**Could not locate** section.
 
 ## Deploying to Vercel
 
@@ -68,11 +71,12 @@ git push -u origin main
 1. Open the deployed URL.
 2. Pick the client from the dropdown.
 3. Upload the order CSV.
-4. Click **Generate pick list**.
-5. Use **Dry run** in the order creation section to validate the upload.
+4. Choose the pick-list sort and any location prefixes.
+5. Click **Generate pick lists**, or use **Dry run** in the order creation
+   section to validate the upload.
 6. To create live orders, uncheck **Dry run**, confirm, and click **Create orders**.
 7. The app will fetch the created ShipHero order lines and prepare pick lists.
-8. Click **Print** if you also need paper pick lists.
+8. Click **Print**.
 
 ## Local development
 
@@ -107,6 +111,13 @@ it reads these columns:
   Shiphero's response
 
 Other columns are ignored.
+
+## Pick-list sorting
+
+Use **Sort pick list** before printing. Options include location route, SKU,
+product name, pick quantity high-to-low, pick quantity low-to-high, and low
+on-hand quantity. Changing the sort does not call ShipHero again; it reorders
+the currently generated pick list.
 
 ## CSV format for order creation
 
@@ -190,6 +201,7 @@ app/
     picklist/route.ts     # POST /api/picklist — generate pick list
 lib/
   order-import.ts         # CSV parsing + order import validation
+  picklist.ts             # Pick quantity allocation + sort modes
   shiphero.ts             # Token refresh + GraphQL queries
   sort.ts                 # Natural alphanumeric sort for bin codes
 .env.example              # SHIPHERO_REFRESH_TOKEN

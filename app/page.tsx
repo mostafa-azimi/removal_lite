@@ -8,6 +8,14 @@ import {
   validateOrderDraft,
   type OrderImportParseResult,
 } from "@/lib/order-import";
+import {
+  PICK_SORT_OPTIONS,
+  allocatePickRows,
+  comparePickRows,
+  sortPickRows,
+  type PickSortMode,
+  type PicklistRow,
+} from "@/lib/picklist";
 
 type ClientAccount = { id: string; companyName: string; email: string | null };
 
@@ -25,8 +33,6 @@ type BinRow = {
   bin: string;
   onHand: number;
 };
-
-type PicklistRow = BinRow & { needed: number };
 
 type OrderResult = {
   orderNumber: string;
@@ -113,6 +119,7 @@ export default function Home() {
   const [skipAddressValidation, setSkipAddressValidation] = useState(false);
   const [ignoreAddressValidationErrors, setIgnoreAddressValidationErrors] = useState(false);
   const [locationPrefixInput, setLocationPrefixInput] = useState("");
+  const [pickSortMode, setPickSortMode] = useState<PickSortMode>("location");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -319,17 +326,17 @@ export default function Home() {
             });
             continue;
           }
-          for (const bin of bins) {
-            rows.push({ ...bin, needed });
+          const allocated = allocatePickRows(bins, needed);
+          rows.push(...allocated.rows);
+          if (allocated.shortage > 0) {
+            missing.push({
+              sku,
+              needed: allocated.shortage,
+              reason: `Only ${allocated.available} pickable units found across bins; ${allocated.shortage} still needed`,
+            });
           }
         }
-        rows.sort((a, b) => {
-          const w = collator.compare(a.warehouseIdentifier ?? "", b.warehouseIdentifier ?? "");
-          if (w !== 0) return w;
-          const bin = collator.compare(a.bin, b.bin);
-          if (bin !== 0) return bin;
-          return collator.compare(a.sku, b.sku);
-        });
+        rows.sort((a, b) => comparePickRows(a, b, pickSortMode));
         builtOrders.push({
           orderNumber,
           rows,
@@ -449,7 +456,8 @@ export default function Home() {
       <div className="no-print">
         <h1>Shiphero Pick List</h1>
         <p className="subtitle">
-          Upload an order CSV, pick the client, and print bin-sorted pick lists — one page per order.
+          Upload one ShipHero order CSV, create orders when needed, and print a pick list from
+          the same SKU and quantity rows.
         </p>
 
         {clientsError && (
@@ -499,15 +507,29 @@ export default function Home() {
             </div>
           )}
           <p style={{ color: "#777", fontSize: 12, margin: "8px 0 0" }}>
-            Only three columns are read: <code>{ORDER_HEADER}</code>, <code>{SKU_HEADER}</code>, and{" "}
-            <code>{QTY_HEADER}</code>. Everything else is ignored.
+            Picking is driven by <code>{ORDER_HEADER}</code>, <code>{SKU_HEADER}</code>, and{" "}
+            <code>{QTY_HEADER}</code>. Order creation also uses the address and customer fields
+            in the same file.
           </p>
         </div>
 
         <div className="card">
-          <h2>3. Generate</h2>
+          <h2>3. Pick list</h2>
           <div className="field-grid compact">
-            <label className="wide">
+            <label>
+              Sort pick list
+              <select
+                value={pickSortMode}
+                onChange={(e) => setPickSortMode(e.target.value as PickSortMode)}
+              >
+                {PICK_SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               Location prefixes
               <input
                 type="text"
@@ -847,6 +869,7 @@ export default function Home() {
             clientName={selectedClientName}
             generatedAt={generatedAt}
             locationPrefixes={locationPrefixes}
+            pickSortMode={pickSortMode}
           />
         ))}
     </main>
@@ -859,24 +882,34 @@ function OrderSection({
   clientName,
   generatedAt,
   locationPrefixes,
+  pickSortMode,
 }: {
   order: OrderResult;
   isFirst: boolean;
   clientName: string;
   generatedAt: string;
   locationPrefixes: string[];
+  pickSortMode: PickSortMode;
 }) {
+  const sortedRows = useMemo(
+    () => sortPickRows(order.rows, pickSortMode),
+    [order.rows, pickSortMode]
+  );
+  const sortLabel =
+    PICK_SORT_OPTIONS.find((option) => option.value === pickSortMode)?.label ?? "Location route";
+  const groupByWarehouse = pickSortMode === "location";
+
   const grouped = useMemo(() => {
     const prefixGroups = new Map<string, PicklistRow[]>();
     const prefixes = [...locationPrefixes].sort((a, b) => b.length - a.length);
 
     if (prefixes.length === 0) {
-      prefixGroups.set("", order.rows);
+      prefixGroups.set("", sortedRows);
     } else {
       for (const prefix of prefixes) prefixGroups.set(prefix, []);
       prefixGroups.set("Other locations", []);
 
-      for (const row of order.rows) {
+      for (const row of sortedRows) {
         const matched = prefixes.find((prefix) =>
           row.bin.toLowerCase().startsWith(prefix.toLowerCase())
         );
@@ -888,6 +921,14 @@ function OrderSection({
     return [...prefixGroups.entries()]
       .filter(([, rows]) => rows.length > 0)
       .map(([prefix, rows]) => {
+        if (!groupByWarehouse) {
+          return {
+            prefix,
+            rows,
+            warehouses: [],
+          };
+        }
+
         const warehouses = new Map<string, PicklistRow[]>();
         for (const row of rows) {
           const key = row.warehouseIdentifier || row.warehouseId || "Warehouse";
@@ -897,12 +938,13 @@ function OrderSection({
         }
         return {
           prefix,
+          rows: [],
           warehouses: [...warehouses.entries()].sort(([a], [b]) =>
             a.localeCompare(b, undefined, { sensitivity: "base", numeric: true })
           ),
         };
       });
-  }, [order.rows, locationPrefixes]);
+  }, [sortedRows, locationPrefixes, groupByWarehouse]);
 
   return (
     <section className={`picklist order-page${isFirst ? "" : " page-break"}`}>
@@ -930,6 +972,10 @@ function OrderSection({
           <span className="label">Pick lines</span>
           {order.rows.length}
         </div>
+        <div>
+          <span className="label">Sorted by</span>
+          {sortLabel}
+        </div>
         {locationPrefixes.length > 0 && (
           <div>
             <span className="label">Location prefixes</span>
@@ -947,39 +993,16 @@ function OrderSection({
       {grouped.map((group) => (
         <div key={group.prefix || "all"} className="prefix-section">
           {group.prefix && <h3>Location prefix: {group.prefix}</h3>}
-          {group.warehouses.map(([warehouse, rows]) => (
-            <div key={`${group.prefix}-${warehouse}`} className="warehouse-section">
-              <h4>Warehouse: {warehouse}</h4>
-              <table className="pick">
-                <thead>
-                  <tr>
-                    <th style={{ width: 32 }}>✓</th>
-                    <th style={{ width: "22%" }}>Bin</th>
-                    <th style={{ width: "28%" }}>SKU</th>
-                    <th>Product</th>
-                    <th style={{ width: "10%", textAlign: "right" }}>On hand</th>
-                    <th style={{ width: "12%", textAlign: "right" }}>Pick qty</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r, i) => (
-                    <tr key={`${r.bin}-${r.sku}-${i}`}>
-                      <td className="checkbox">
-                        <span className="box" />
-                      </td>
-                      <td className="bin">{r.bin}</td>
-                      <td className="sku">{r.sku}</td>
-                      <td>{r.productName || ""}</td>
-                      <td className="qty" style={{ color: "#666", fontWeight: 500 }}>
-                        {r.onHand}
-                      </td>
-                      <td className="qty">{r.needed}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
+          {group.rows.length > 0 ? (
+            <PickRowsTable rows={group.rows} showWarehouse />
+          ) : (
+            group.warehouses.map(([warehouse, rows]) => (
+              <div key={`${group.prefix}-${warehouse}`} className="warehouse-section">
+                <h4>Warehouse: {warehouse}</h4>
+                <PickRowsTable rows={rows} showWarehouse={false} />
+              </div>
+            ))
+          )}
         </div>
       ))}
 
@@ -990,7 +1013,7 @@ function OrderSection({
             <thead>
               <tr>
                 <th>SKU</th>
-                <th style={{ textAlign: "right", width: "12%" }}>Needed</th>
+                <th style={{ textAlign: "right", width: "12%" }}>Missing</th>
                 <th>Reason</th>
               </tr>
             </thead>
@@ -1007,5 +1030,48 @@ function OrderSection({
         </div>
       )}
     </section>
+  );
+}
+
+function PickRowsTable({
+  rows,
+  showWarehouse,
+}: {
+  rows: PicklistRow[];
+  showWarehouse: boolean;
+}) {
+  return (
+    <table className="pick">
+      <thead>
+        <tr>
+          <th style={{ width: 32 }}>✓</th>
+          {showWarehouse && <th style={{ width: "12%" }}>Warehouse</th>}
+          <th style={{ width: showWarehouse ? "16%" : "19%" }}>Bin</th>
+          <th style={{ width: showWarehouse ? "22%" : "24%" }}>SKU</th>
+          <th>Product</th>
+          <th style={{ width: "9%", textAlign: "right" }}>On hand</th>
+          <th style={{ width: "9%", textAlign: "right" }}>Needed</th>
+          <th style={{ width: "9%", textAlign: "right" }}>Pick</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={`${r.bin}-${r.sku}-${i}`}>
+            <td className="checkbox">
+              <span className="box" />
+            </td>
+            {showWarehouse && (
+              <td className="warehouse">{r.warehouseIdentifier || r.warehouseId || ""}</td>
+            )}
+            <td className="bin">{r.bin}</td>
+            <td className="sku">{r.sku}</td>
+            <td className="product">{r.productName || ""}</td>
+            <td className="qty muted">{r.onHand}</td>
+            <td className="qty muted">{r.needed}</td>
+            <td className="qty pick-qty">{r.pickQty}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

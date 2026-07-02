@@ -339,14 +339,31 @@ table.pick td.bin {
   font-weight: 700;
   white-space: nowrap;
 }
+table.pick td.warehouse {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #555;
+  white-space: nowrap;
+}
 table.pick td.sku {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+table.pick td.product {
+  color: #222;
+  line-height: 1.25;
 }
 table.pick td.qty {
   text-align: right;
   font-weight: 700;
   font-size: 16px;
   white-space: nowrap;
+}
+table.pick td.qty.muted {
+  color: #666;
+  font-weight: 500;
+}
+table.pick td.qty.pick-qty {
+  color: #000;
+  font-size: 18px;
 }
 table.pick td.checkbox {
   width: 32px;
@@ -450,6 +467,10 @@ table.pick td.checkbox .box {
 
   table.pick td.qty {
     font-size: 13pt;
+  }
+
+  table.pick td.qty.pick-qty {
+    font-size: 15pt;
   }
 
   table.pick td.checkbox .box {

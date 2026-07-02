@@ -3,13 +3,13 @@ import {
   createShipHeroOrder,
   fetchBinsForSkus,
   fetchOrderForPickList,
-  type BinRow,
   type CreateOrderAddressInput,
   type CreateOrderInput,
   type ShipHeroAuthOverride,
   type ShipHeroOrderForPickList,
 } from "@/lib/shiphero";
 import { validateOrderDraft, type OrderDraft } from "@/lib/order-import";
+import { allocatePickRows, sortPickRows, type PicklistRow } from "@/lib/picklist";
 
 export const maxDuration = 60;
 export const runtime = "nodejs";
@@ -38,8 +38,6 @@ type OrderImportResult = {
   pickLines?: number;
   message?: string;
 };
-
-type PicklistRow = BinRow & { needed: number };
 
 type PicklistOrder = {
   orderNumber: string;
@@ -134,26 +132,6 @@ function authFromBody(auth: ShipHeroAuthOverride | null | undefined) {
   return { accessToken, refreshToken };
 }
 
-function sortPickRows(rows: PicklistRow[]) {
-  rows.sort((a, b) => {
-    const w = (a.warehouseIdentifier ?? "").localeCompare(
-      b.warehouseIdentifier ?? "",
-      undefined,
-      { sensitivity: "base", numeric: true }
-    );
-    if (w !== 0) return w;
-    const bin = a.bin.localeCompare(b.bin, undefined, {
-      sensitivity: "base",
-      numeric: true,
-    });
-    if (bin !== 0) return bin;
-    return a.sku.localeCompare(b.sku, undefined, {
-      sensitivity: "base",
-      numeric: true,
-    });
-  });
-}
-
 async function buildPicklistFromShipHeroOrder(
   order: ShipHeroOrderForPickList,
   customerAccountId: string | null,
@@ -190,21 +168,29 @@ async function buildPicklistFromShipHeroOrder(
       });
       continue;
     }
-    for (const bin of bins.rows) {
-      rows.push({
+    const allocated = allocatePickRows(
+      bins.rows.map((bin) => ({
         ...bin,
         productName: bin.productName || info.productName,
-        needed: info.needed,
+      })),
+      info.needed
+    );
+    rows.push(...allocated.rows);
+    if (allocated.shortage > 0) {
+      missing.push({
+        sku,
+        needed: allocated.shortage,
+        reason: `Only ${allocated.available} pickable units found across bins; ${allocated.shortage} still needed`,
       });
     }
   }
 
-  sortPickRows(rows);
+  const sortedRows = sortPickRows(rows);
 
   return {
     orderNumber: order.orderNumber,
     sourceOrderId: order.id,
-    rows,
+    rows: sortedRows,
     missing,
     totals: {
       uniqueSkus: skuMap.size,
