@@ -24,6 +24,7 @@ type ApiResponse = {
   globalTotals: {
     orders: number;
     lines: number;
+    alternateBins: number;
     uniqueSkus: number;
     totalQty: number;
   };
@@ -133,7 +134,11 @@ export async function POST(req: NextRequest) {
     orders,
     globalTotals: {
       orders: orders.length,
-      lines: orders.reduce((acc, o) => acc + o.rows.length, 0),
+      lines: orders.reduce((acc, o) => acc + o.rows.filter((row) => row.pickQty > 0).length, 0),
+      alternateBins: orders.reduce(
+        (acc, o) => acc + o.rows.filter((row) => row.pickQty <= 0).length,
+        0
+      ),
       uniqueSkus: allSkus.size,
       totalQty: orders.reduce((acc, o) => acc + o.totals.totalQty, 0),
     },
