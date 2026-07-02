@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBinsForSkus } from "@/lib/shiphero";
+import { fetchBinsForSkus, type ShipHeroAuthOverride } from "@/lib/shiphero";
 import { allocatePickRows, sortPickRows, type PicklistRow } from "@/lib/picklist";
 
 // Allow up to 60s for big orders; Shiphero rate-limits and we run sequentially-ish.
@@ -31,8 +31,19 @@ type ApiResponse = {
 
 const NO_ORDER_KEY = "(no order #)";
 
+function cleanAuth(auth: ShipHeroAuthOverride | null | undefined) {
+  const accessToken = typeof auth?.accessToken === "string" ? auth.accessToken.trim() : "";
+  const refreshToken = typeof auth?.refreshToken === "string" ? auth.refreshToken.trim() : "";
+  if (!accessToken && !refreshToken) return undefined;
+  return { accessToken: accessToken || undefined, refreshToken: refreshToken || undefined };
+}
+
 export async function POST(req: NextRequest) {
-  let body: { lines: IncomingLine[]; customerAccountId?: string | null };
+  let body: {
+    lines: IncomingLine[];
+    customerAccountId?: string | null;
+    auth?: ShipHeroAuthOverride | null;
+  };
   try {
     body = await req.json();
   } catch {
@@ -43,6 +54,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No lines provided" }, { status: 400 });
   }
   const customerAccountId = body.customerAccountId?.trim() || null;
+  const auth = cleanAuth(body.auth);
 
   // Group lines by order. Within an order, sum quantities of duplicate SKUs.
   const ordersMap = new Map<string, Map<string, number>>();
@@ -64,7 +76,7 @@ export async function POST(req: NextRequest) {
     for (const sku of skuMap.keys()) allSkus.add(sku);
   }
 
-  const fetched = await fetchBinsForSkus([...allSkus], customerAccountId, 4);
+  const fetched = await fetchBinsForSkus([...allSkus], customerAccountId, 4, auth);
 
   // Build per-order results.
   const orders: OrderResult[] = [];
