@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBinsForSkus, type BinRow } from "@/lib/shiphero";
-import { compareBins, compareStrings } from "@/lib/sort";
+import { fetchBinsForSkus } from "@/lib/shiphero";
+import { allocatePickRows, sortPickRows, type PicklistRow } from "@/lib/picklist";
 
 // Allow up to 60s for big orders; Shiphero rate-limits and we run sequentially-ish.
 export const maxDuration = 60;
@@ -10,10 +10,6 @@ type IncomingLine = {
   sku: string;
   qty: number;
   orderNumber: string | null;
-};
-
-export type PicklistRow = BinRow & {
-  needed: number;
 };
 
 type OrderResult = {
@@ -94,23 +90,20 @@ export async function POST(req: NextRequest) {
         });
         continue;
       }
-      for (const bin of r.rows) {
-        rows.push({ ...bin, needed });
+      const allocated = allocatePickRows(r.rows, needed);
+      rows.push(...allocated.rows);
+      if (allocated.shortage > 0) {
+        missing.push({
+          sku,
+          needed: allocated.shortage,
+          reason: `Only ${allocated.available} pickable units found across bins; ${allocated.shortage} still needed`,
+        });
       }
     }
 
-    // Sort within the order: warehouse, then bin alphanumerically, then SKU.
-    rows.sort((a, b) => {
-      const w = compareStrings(a.warehouseIdentifier, b.warehouseIdentifier);
-      if (w !== 0) return w;
-      const bin = compareBins(a.bin, b.bin);
-      if (bin !== 0) return bin;
-      return compareStrings(a.sku, b.sku);
-    });
-
     orders.push({
       orderNumber,
-      rows,
+      rows: sortPickRows(rows),
       missing,
       totals: {
         uniqueSkus: skuMap.size,
