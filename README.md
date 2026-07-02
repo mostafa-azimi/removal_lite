@@ -16,17 +16,20 @@ orders.
 4. Uses `Product Sku (Required)` and `Quantity` as the pick-list driver.
 5. Looks up product name, bin/location, warehouse, and on-hand quantity.
 6. Allocates the needed quantity across available bins for each SKU.
-7. Sorts by location route, SKU, product, pick quantity, or low on-hand quantity.
-8. Prints a paper-friendly pick list with checkboxes and page breaks.
+7. Always shows the remaining available bins as alternate locations.
+8. Sorts by location route, SKU, product, pick quantity, or low on-hand quantity.
+9. Prints a paper-friendly pick list with checkboxes and page breaks.
 
 ## Output Columns
 
-| Check | Bin | SKU | Product | On hand | Needed | Pick |
-|---|---|---|---|---|---|---|
+| Check | Use | Bin | SKU | Product | On hand | Needed | Pick |
+|---|---|---|---|---|---|---|---|
 
-The **Pick** column is the amount to pull from that specific bin. If available
-bins do not cover the full need, the remaining shortage appears in the
-**Could not locate** section.
+The **Use** column marks each row as **Pick** or **Alternate**. The **Pick**
+column is the amount to pull from that specific bin. Alternate rows are shown
+for reference and validation, but their pick quantity is always `0`. If
+available bins do not cover the full need, the remaining shortage appears in
+the **Could not locate** section.
 
 ## Token Setup
 

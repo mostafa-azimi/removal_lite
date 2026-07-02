@@ -365,6 +365,13 @@ table.pick td.qty.pick-qty {
   color: #000;
   font-size: 18px;
 }
+table.pick tr.alternate-row td {
+  background: #f7f7f9;
+  color: #555;
+}
+table.pick tr.alternate-row td.qty.pick-qty {
+  color: #555;
+}
 table.pick td.checkbox {
   width: 32px;
   text-align: center;
@@ -375,6 +382,33 @@ table.pick td.checkbox .box {
   height: 18px;
   border: 2px solid #111;
   border-radius: 3px;
+}
+table.pick td.checkbox .alt-dash {
+  color: #777;
+  font-weight: 700;
+}
+.row-type {
+  display: inline-block;
+  min-width: 62px;
+  padding: 3px 7px;
+  border: 1px solid #d0d0d6;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.row-type.pick {
+  background: #e9f8ed;
+  border-color: #b9e3c0;
+  color: #17652b;
+}
+.row-type.alternate {
+  background: #f3f3f5;
+  border-color: #cfcfd6;
+  color: #555;
 }
 
 .product-name {
@@ -473,9 +507,21 @@ table.pick td.checkbox .box {
     font-size: 15pt;
   }
 
+  table.pick tr.alternate-row td {
+    background: #f5f5f5;
+    color: #333;
+  }
+
   table.pick td.checkbox .box {
     width: 14pt;
     height: 14pt;
     border-color: #000;
+  }
+
+  .row-type {
+    background: #fff !important;
+    color: #000 !important;
+    border-color: #777 !important;
+    font-size: 8pt;
   }
 }

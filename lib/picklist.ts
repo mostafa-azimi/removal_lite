@@ -20,6 +20,7 @@ export const PICK_SORT_OPTIONS: Array<{ value: PickSortMode; label: string }> = 
 export type PicklistRow = BinRow & {
   needed: number;
   pickQty: number;
+  rowType: "pick" | "alternate";
 };
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -92,10 +93,16 @@ export function allocatePickRows(bins: BinRow[], needed: number) {
   });
 
   for (const bin of sortedBins) {
-    if (remaining <= 0) break;
-    const pickQty = Math.min(Math.max(0, bin.onHand), remaining);
-    if (pickQty <= 0) continue;
-    rows.push({ ...bin, needed, pickQty });
+    const onHand = Math.max(0, bin.onHand);
+    if (onHand <= 0) continue;
+
+    const pickQty = remaining > 0 ? Math.min(onHand, remaining) : 0;
+    rows.push({
+      ...bin,
+      needed,
+      pickQty,
+      rowType: pickQty > 0 ? "pick" : "alternate",
+    });
     remaining -= pickQty;
   }
 

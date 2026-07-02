@@ -567,6 +567,8 @@ function OrderSection({
         };
       });
   }, [sortedRows, locationPrefixes, groupByWarehouse]);
+  const pickLineCount = order.rows.filter((row) => row.pickQty > 0).length;
+  const alternateBinCount = order.rows.filter((row) => row.pickQty <= 0).length;
 
   return (
     <section className={`picklist order-page${isFirst ? "" : " page-break"}`}>
@@ -592,7 +594,11 @@ function OrderSection({
         </div>
         <div>
           <span className="label">Pick lines</span>
-          {order.rows.length}
+          {pickLineCount}
+        </div>
+        <div>
+          <span className="label">Alternate bins</span>
+          {alternateBinCount}
         </div>
         <div>
           <span className="label">Sorted by</span>
@@ -667,9 +673,10 @@ function PickRowsTable({
       <thead>
         <tr>
           <th style={{ width: 32 }}>✓</th>
-          {showWarehouse && <th style={{ width: "12%" }}>Warehouse</th>}
-          <th style={{ width: showWarehouse ? "16%" : "19%" }}>Bin</th>
-          <th style={{ width: showWarehouse ? "22%" : "24%" }}>SKU</th>
+          <th style={{ width: "9%" }}>Use</th>
+          {showWarehouse && <th style={{ width: "11%" }}>Warehouse</th>}
+          <th style={{ width: showWarehouse ? "15%" : "18%" }}>Bin</th>
+          <th style={{ width: showWarehouse ? "21%" : "23%" }}>SKU</th>
           <th>Product</th>
           <th style={{ width: "9%", textAlign: "right" }}>On hand</th>
           <th style={{ width: "9%", textAlign: "right" }}>Needed</th>
@@ -677,22 +684,30 @@ function PickRowsTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((r, i) => (
-          <tr key={`${r.bin}-${r.sku}-${i}`}>
-            <td className="checkbox">
-              <span className="box" />
-            </td>
-            {showWarehouse && (
-              <td className="warehouse">{r.warehouseIdentifier || r.warehouseId || ""}</td>
-            )}
-            <td className="bin">{r.bin}</td>
-            <td className="sku">{r.sku}</td>
-            <td className="product">{r.productName || ""}</td>
-            <td className="qty muted">{r.onHand}</td>
-            <td className="qty muted">{r.needed}</td>
-            <td className="qty pick-qty">{r.pickQty}</td>
-          </tr>
-        ))}
+        {rows.map((r, i) => {
+          const isAlternate = r.rowType === "alternate" || r.pickQty <= 0;
+          return (
+            <tr className={isAlternate ? "alternate-row" : ""} key={`${r.bin}-${r.sku}-${i}`}>
+              <td className="checkbox">
+                {isAlternate ? <span className="alt-dash">-</span> : <span className="box" />}
+              </td>
+              <td>
+                <span className={`row-type ${isAlternate ? "alternate" : "pick"}`}>
+                  {isAlternate ? "Alternate" : "Pick"}
+                </span>
+              </td>
+              {showWarehouse && (
+                <td className="warehouse">{r.warehouseIdentifier || r.warehouseId || ""}</td>
+              )}
+              <td className="bin">{r.bin}</td>
+              <td className="sku">{r.sku}</td>
+              <td className="product">{r.productName || ""}</td>
+              <td className="qty muted">{r.onHand}</td>
+              <td className="qty muted">{r.needed}</td>
+              <td className="qty pick-qty">{r.pickQty}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
