@@ -431,14 +431,16 @@ type ClientsFromProductsResponse = {
   };
 };
 
-async function fetchCustomerAccountsViaUsers(): Promise<CustomerAccount[] | null> {
+async function fetchCustomerAccountsViaUsers(
+  auth?: ShipHeroAuthOverride
+): Promise<CustomerAccount[] | null> {
   const seen = new Map<string, CustomerAccount>();
   let cursor: string | null = null;
 
   for (let i = 0; i < 50; i++) {
     let data: UsersResponse;
     try {
-      data = await gql<UsersResponse>(USERS_QUERY, { cursor });
+      data = await gql<UsersResponse>(USERS_QUERY, { cursor }, 0, auth);
     } catch (err) {
       // Schema doesn't have `users` — caller will fall back.
       if (i === 0) return null;
@@ -471,14 +473,18 @@ async function fetchCustomerAccountsViaUsers(): Promise<CustomerAccount[] | null
   return [...seen.values()];
 }
 
-async function fetchCustomerAccountsViaProducts(): Promise<CustomerAccount[]> {
+async function fetchCustomerAccountsViaProducts(
+  auth?: ShipHeroAuthOverride
+): Promise<CustomerAccount[]> {
   const seen = new Map<string, { sampleProductName: string | null }>();
   let cursor: string | null = null;
 
   for (let i = 0; i < 50; i++) {
     const data: ClientsFromProductsResponse = await gql<ClientsFromProductsResponse>(
       CLIENTS_FROM_PRODUCTS_QUERY,
-      { cursor }
+      { cursor },
+      0,
+      auth
     );
     const conn = data.products?.data;
     const edges = conn?.edges ?? [];
@@ -503,13 +509,15 @@ async function fetchCustomerAccountsViaProducts(): Promise<CustomerAccount[]> {
   }));
 }
 
-export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
+export async function fetchCustomerAccounts(
+  auth?: ShipHeroAuthOverride
+): Promise<CustomerAccount[]> {
   // Primary path: top-level users query (returns clients reliably for 3PLs).
-  let accounts = await fetchCustomerAccountsViaUsers();
+  let accounts = await fetchCustomerAccountsViaUsers(auth);
 
   // Fallback: derive from products if users isn't available.
   if (!accounts || accounts.length === 0) {
-    accounts = await fetchCustomerAccountsViaProducts();
+    accounts = await fetchCustomerAccountsViaProducts(auth);
   }
 
   // Sort alphabetically for the dropdown.
@@ -517,240 +525,4 @@ export async function fetchCustomerAccounts(): Promise<CustomerAccount[]> {
     a.companyName.localeCompare(b.companyName, undefined, { sensitivity: "base" })
   );
   return accounts;
-}
-
-export type CreateOrderAddressInput = {
-  first_name?: string;
-  last_name?: string;
-  company?: string;
-  address1?: string;
-  address2?: string;
-  city?: string;
-  state?: string;
-  zip?: string;
-  country?: string;
-  email?: string;
-  phone?: string;
-};
-
-export type CreateLineItemInput = {
-  sku: string;
-  partner_line_item_id: string;
-  quantity: number;
-  price: string;
-  product_name?: string;
-  warehouse_id?: string;
-};
-
-export type CreateOrderInput = {
-  customer_account_id?: string;
-  order_number: string;
-  partner_order_id?: string;
-  shop_name?: string;
-  fulfillment_status?: string;
-  order_date?: string;
-  currency?: string;
-  email?: string;
-  tags?: string[];
-  gift_note?: string;
-  packing_note?: string;
-  shipping_address: CreateOrderAddressInput;
-  billing_address?: CreateOrderAddressInput;
-  shipping_lines?: {
-    title: string;
-    price: string;
-    carrier?: string;
-    method?: string;
-  };
-  line_items: CreateLineItemInput[];
-  skip_address_validation?: boolean;
-  ignore_address_validation_errors?: boolean;
-  allow_partial?: boolean;
-  allow_split?: boolean;
-};
-
-export type CreateOrderResponse = {
-  order_create: {
-    request_id: string | null;
-    complexity: number | null;
-    order: {
-      id: string | null;
-      legacy_id: number | string | null;
-      order_number: string | null;
-      fulfillment_status: string | null;
-      order_date: string | null;
-      account_id: string | null;
-      line_items: {
-        edges: Array<{
-          node: {
-            id: string | null;
-            sku: string | null;
-            quantity: number | null;
-            product_name: string | null;
-          };
-        }>;
-      } | null;
-    } | null;
-  };
-};
-
-export type ShipHeroOrderLine = {
-  id: string | null;
-  sku: string;
-  quantity: number;
-  productName: string | null;
-};
-
-export type ShipHeroOrderForPickList = {
-  id: string;
-  orderNumber: string;
-  requestId: string | null;
-  complexity: number | null;
-  lineItems: ShipHeroOrderLine[];
-};
-
-type OrderLineItemsResponse = {
-  order: {
-    request_id: string | null;
-    complexity: number | null;
-    data: {
-      id: string | null;
-      order_number: string | null;
-      line_items: {
-        edges: Array<{
-          node: {
-            id: string | null;
-            sku: string | null;
-            quantity: number | null;
-            product_name: string | null;
-          };
-        }>;
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      } | null;
-    } | null;
-  };
-};
-
-const ORDER_LINE_ITEMS_QUERY = /* GraphQL */ `
-  query GetOrderLineItems($id: String!, $cursor: String) {
-    order(id: $id) {
-      request_id
-      complexity
-      data {
-        id
-        order_number
-        line_items(first: 100, after: $cursor) {
-          edges {
-            node {
-              id
-              sku
-              quantity
-              product_name
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    }
-  }
-`;
-
-const ORDER_CREATE_MUTATION = /* GraphQL */ `
-  mutation CreateOrder($data: CreateOrderInput!) {
-    order_create(data: $data) {
-      request_id
-      complexity
-      order {
-        id
-        legacy_id
-        order_number
-        fulfillment_status
-        order_date
-        account_id
-        line_items(first: 50) {
-          edges {
-            node {
-              id
-              sku
-              quantity
-              product_name
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
-export async function createShipHeroOrder(
-  data: CreateOrderInput,
-  auth?: ShipHeroAuthOverride
-): Promise<CreateOrderResponse["order_create"]> {
-  const response = await gql<CreateOrderResponse>(
-    ORDER_CREATE_MUTATION,
-    { data },
-    0,
-    auth
-  );
-  if (!response.order_create?.order) {
-    throw new Error("Shiphero order_create response did not include an order");
-  }
-  return response.order_create;
-}
-
-export async function fetchOrderForPickList(
-  orderId: string,
-  auth?: ShipHeroAuthOverride
-): Promise<ShipHeroOrderForPickList> {
-  const lineItems: ShipHeroOrderLine[] = [];
-  let cursor: string | null = null;
-  let orderNumber = orderId;
-  let requestId: string | null = null;
-  let complexity: number | null = null;
-
-  for (let i = 0; i < 50; i++) {
-    const response: OrderLineItemsResponse = await gql<OrderLineItemsResponse>(
-      ORDER_LINE_ITEMS_QUERY,
-      { id: orderId, cursor },
-      0,
-      auth
-    );
-    const payload = response.order;
-    const order = payload?.data;
-    if (!order?.id) {
-      throw new Error(`Shiphero order lookup returned no order for ${orderId}`);
-    }
-    requestId = payload.request_id;
-    complexity = (complexity ?? 0) + (payload.complexity ?? 0);
-    orderNumber = order.order_number || orderId;
-
-    const conn = order.line_items;
-    for (const edge of conn?.edges ?? []) {
-      const node = edge.node;
-      const sku = node.sku?.trim();
-      const quantity = node.quantity ?? 0;
-      if (!sku || quantity <= 0) continue;
-      lineItems.push({
-        id: node.id,
-        sku,
-        quantity,
-        productName: node.product_name,
-      });
-    }
-
-    if (!conn?.pageInfo?.hasNextPage) break;
-    cursor = conn.pageInfo.endCursor;
-    if (!cursor) break;
-  }
-
-  return {
-    id: orderId,
-    orderNumber,
-    requestId,
-    complexity,
-    lineItems,
-  };
 }

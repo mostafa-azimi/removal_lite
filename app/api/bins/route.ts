@@ -1,13 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBinsForSkus } from "@/lib/shiphero";
+import { fetchBinsForSkus, type ShipHeroAuthOverride } from "@/lib/shiphero";
 
 // Smaller batches finish well under any timeout. Client batches into chunks
 // of ~40 SKUs so even on a hobby plan with 10s limits we'd be fine.
 export const maxDuration = 60;
 export const runtime = "nodejs";
 
+function cleanAuth(auth: ShipHeroAuthOverride | null | undefined) {
+  const accessToken = typeof auth?.accessToken === "string" ? auth.accessToken.trim() : "";
+  const refreshToken = typeof auth?.refreshToken === "string" ? auth.refreshToken.trim() : "";
+  if (!accessToken && !refreshToken) return undefined;
+  return { accessToken: accessToken || undefined, refreshToken: refreshToken || undefined };
+}
+
 export async function POST(req: NextRequest) {
-  let body: { skus: string[]; customerAccountId?: string | null };
+  let body: {
+    skus: string[];
+    customerAccountId?: string | null;
+    auth?: ShipHeroAuthOverride | null;
+  };
   try {
     body = await req.json();
   } catch {
@@ -18,10 +29,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ bins: {}, errors: {} });
   }
   const customerAccountId = body.customerAccountId?.trim() || null;
+  const auth = cleanAuth(body.auth);
 
   // Concurrency 3: each query is cheap (~10-20 credits), but Shiphero's bucket
   // regenerates at 60/sec so this keeps us comfortably under the limit.
-  const fetched = await fetchBinsForSkus(skus, customerAccountId, 3);
+  const fetched = await fetchBinsForSkus(skus, customerAccountId, 3, auth);
 
   const bins: Record<string, unknown[]> = {};
   const errors: Record<string, string> = {};
