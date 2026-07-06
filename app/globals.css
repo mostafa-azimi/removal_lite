@@ -122,6 +122,11 @@ button.secondary {
   border: 1px solid #c7dcff;
   color: #14376b;
 }
+.banner.success {
+  background: #e9f8ed;
+  border: 1px solid #b9e3c0;
+  color: #17652b;
+}
 
 .toolbar {
   display: flex;

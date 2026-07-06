@@ -133,6 +133,45 @@ async function gql<T>(
   return json.data;
 }
 
+const VERIFY_CONNECTION_QUERY = /* GraphQL */ `
+  query VerifyShipHeroConnection {
+    me {
+      request_id
+      complexity
+      data {
+        id
+        email
+        account {
+          id
+        }
+      }
+    }
+  }
+`;
+
+type VerifyConnectionResponse = {
+  me: {
+    data: {
+      id: string | null;
+      email: string | null;
+      account: { id: string | null } | null;
+    } | null;
+  };
+};
+
+export async function verifyShipHeroConnection(auth?: ShipHeroAuthOverride) {
+  const data = await gql<VerifyConnectionResponse>(VERIFY_CONNECTION_QUERY, {}, 0, auth);
+  const user = data.me?.data;
+  if (!user?.id) {
+    throw new Error("ShipHero connection check did not return a user.");
+  }
+  return {
+    userId: user.id,
+    email: user.email,
+    accountId: user.account?.id ?? null,
+  };
+}
+
 /**
  * Returned bin row, one per (warehouse, bin) for a SKU.
  * If a SKU has no per-bin breakdown we fall back to a single row with the

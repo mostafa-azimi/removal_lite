@@ -1,8 +1,9 @@
 # Shiphero Pick List
 
-A small Next.js app that takes a ShipHero order-upload CSV, calls the ShipHero
-GraphQL API to look up bin/location data for every SKU, and prints a clean
-pick list with sortable bin-level pick quantities.
+A small Next.js app that takes the same ShipHero order-upload CSV used to
+upload/create an order in ShipHero, calls the ShipHero GraphQL API to look up
+bin/location data for every SKU, and prints a clean pick list with sortable
+bin-level pick quantities.
 
 This app is read-only against ShipHero. It does not create, update, or cancel
 orders.
@@ -12,7 +13,8 @@ orders.
 1. Connects to ShipHero with the existing server refresh token, or a token
    pasted into the page for a one-off override.
 2. Lists 3PL clients in a dropdown.
-3. Reads the standard ShipHero order-upload CSV.
+3. Reads the same standard ShipHero order-upload CSV used for the ShipHero
+   order import.
 4. Uses `Product Sku (Required)` and `Quantity` as the pick-list driver.
 5. Looks up product name, bin/location, warehouse, and on-hand quantity.
 6. Allocates the needed quantity across available bins for each SKU.
@@ -39,9 +41,11 @@ The app defaults to the Vercel environment variable:
 SHIPHERO_REFRESH_TOKEN
 ```
 
-In the page, leave **Token source** as **Use server token** to keep using that
-stored token. To test or recover from an expired token, choose **Refresh token**
-or **Access token**, paste the value, and click **Load clients**.
+In the page, leave **Token source** as **Use saved server token** to keep using
+that stored token. If the page says **ShipHero connection verified**, the saved
+token is working and no token needs to be pasted for normal use. To test or
+recover from an expired token, choose **Refresh token** or **Access token**,
+paste the value, and click **Load clients**.
 
 The pasted token is only used for ShipHero lookups in that browser session:
 client list, SKU, product, bin/location, and on-hand quantity.
@@ -49,17 +53,18 @@ client list, SKU, product, bin/location, and on-hand quantity.
 ## Usage
 
 1. Open the app.
-2. Choose **Use server token**, or paste an override token.
+2. Choose **Use saved server token**, or paste an override token.
 3. Click **Load clients**.
 4. Pick a client, or leave **All clients** if you do not want a client filter.
-5. Upload the ShipHero order CSV.
+5. Upload the exact same ShipHero order CSV used for the ShipHero order import.
 6. Choose sort and optional location prefixes.
 7. Click **Generate pick lists**.
 8. Click **Print**.
 
 ## CSV Format
 
-The app expects the standard ShipHero order-upload template and reads:
+The app expects the standard ShipHero order-upload template. Use the exact same
+CSV file that is uploaded into ShipHero. The app reads:
 
 - `Order Number (Required)` - used to group printed pages.
 - `Product Sku (Required)` - SKU to look up.
