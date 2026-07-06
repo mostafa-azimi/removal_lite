@@ -12,6 +12,9 @@ import {
 } from "@/lib/picklist";
 
 type ClientAccount = { id: string; companyName: string; email: string | null };
+type ConnectionStatus =
+  | { status: "verified"; accountId: string | null }
+  | { status: "failed"; message: string };
 
 type CsvLine = {
   sku: string;
@@ -86,6 +89,7 @@ export default function Home() {
   const [tokenValue, setTokenValue] = useState("");
   const [clientsLoading, setClientsLoading] = useState(false);
   const [clientsSource, setClientsSource] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus | null>(null);
   const [locationPrefixInput, setLocationPrefixInput] = useState("");
   const [pickSortMode, setPickSortMode] = useState<PickSortMode>("location");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -93,6 +97,7 @@ export default function Home() {
   async function loadClients(kind: TokenKind = tokenKind, value: string = tokenValue) {
     setClientsLoading(true);
     setClientsError(null);
+    setConnectionStatus(null);
     try {
       const auth = buildAuthPayload(kind, value);
       const res = await fetch("/api/clients", {
@@ -106,8 +111,10 @@ export default function Home() {
       }
       setClients(json.accounts || []);
       setClientsSource(json.source || null);
+      setConnectionStatus(json.connection || null);
     } catch (err) {
       setClients([]);
+      setConnectionStatus(null);
       setClientsError(err instanceof Error ? err.message : String(err));
     } finally {
       setClientsLoading(false);
@@ -323,17 +330,21 @@ export default function Home() {
           <h2>1. Connect to ShipHero</h2>
           <div className="field-grid compact">
             <label>
-              Token source
+              <span className="label-with-help">
+                Token source
+                <HelpTip text="When the app opens, it validates the saved ShipHero refresh token. If the connection is verified, users do not need to paste a token." />
+              </span>
               <select
                 value={tokenKind}
                 onChange={(e) => {
                   const nextKind = e.target.value as TokenKind;
                   setTokenKind(nextKind);
                   setSelectedClient("");
+                  setConnectionStatus(null);
                   setOrders(null);
                 }}
               >
-                <option value="env">Use server token</option>
+                <option value="env">Use saved server token</option>
                 <option value="refresh">Refresh token</option>
                 <option value="access">Access token</option>
               </select>
@@ -347,6 +358,7 @@ export default function Home() {
                   value={tokenValue}
                   onChange={(e) => {
                     setTokenValue(e.target.value);
+                    setConnectionStatus(null);
                     setOrders(null);
                   }}
                   placeholder={tokenKind === "refresh" ? "Paste refresh token" : "Paste access token"}
@@ -355,9 +367,40 @@ export default function Home() {
             )}
           </div>
           <p style={{ color: "#777", fontSize: 12, margin: "8px 0 12px" }}>
-            The token is only used for ShipHero lookups: client list, SKU, bin, location, and
-            on-hand quantity. This app does not create ShipHero orders.
+            Most users should leave this on <strong>Use saved server token</strong>. Paste a
+            token only if the connection check fails or you need to use a different ShipHero account.
           </p>
+          {clientsLoading && !clients && (
+            <div className="banner info" style={{ marginTop: 12 }}>
+              Checking the saved ShipHero refresh token and loading clients...
+            </div>
+          )}
+          {clients && (
+            <div
+              className={`banner ${connectionStatus?.status === "failed" ? "warn" : "success"}`}
+              style={{ marginTop: 12 }}
+            >
+              {connectionStatus?.status === "verified" ? (
+                <>
+                  {tokenKind === "access"
+                    ? "ShipHero access token verified."
+                    : tokenKind === "refresh"
+                      ? "Pasted ShipHero refresh token validated."
+                      : "Saved ShipHero refresh token validated."}{" "}
+                  You do not need to paste a token for normal use.
+                </>
+              ) : connectionStatus?.status === "failed" ? (
+                <>
+                  The client list is loaded from the saved app list, but ShipHero has not verified the
+                  token yet: {connectionStatus.message}
+                </>
+              ) : (
+                <>
+                  Client list loaded. ShipHero will use the selected token when it looks up bins.
+                </>
+              )}
+            </div>
+          )}
           <div className="row">
             <button
               className="secondary"
@@ -384,13 +427,27 @@ export default function Home() {
               ))}
             </select>
             <span style={{ color: "#777", fontSize: 12 }}>
-              {clients ? `${clients.length} clients${clientsSource ? ` (${clientsSource})` : ""}` : ""}
+              {clients
+                ? `${clients.length} clients${
+                    clientsSource === "config"
+                      ? " from saved list"
+                      : clientsSource === "shiphero"
+                        ? " from ShipHero"
+                        : ""
+                  }`
+                : ""}
             </span>
           </div>
         </div>
 
         <div className="card">
-          <h2>2. Upload the Shiphero order CSV</h2>
+          <h2 className="heading-with-help">
+            2. Upload the same CSV you upload into ShipHero
+            <HelpTip text="Use the standard ShipHero order-upload CSV here too. The app only reads order number, SKU, and quantity, so the address and shipping columns can stay in the file." />
+          </h2>
+          <div className="banner info">
+            Use the exact ShipHero order-upload CSV. Do not create a separate file for this app.
+          </div>
           <div className="row">
             <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={handleFile} />
             {csvFileName && (
@@ -406,8 +463,9 @@ export default function Home() {
             </div>
           )}
           <p style={{ color: "#777", fontSize: 12, margin: "8px 0 0" }}>
-            Picking is driven by <code>{ORDER_HEADER}</code>, <code>{SKU_HEADER}</code>, and{" "}
-            <code>{QTY_HEADER}</code>. Address fields in the CSV are ignored.
+            This app reads <code>{ORDER_HEADER}</code>, <code>{SKU_HEADER}</code>, and{" "}
+            <code>{QTY_HEADER}</code> from that same file. Address and shipping columns can stay in
+            the CSV; they are ignored here.
           </p>
         </div>
 
@@ -495,6 +553,14 @@ export default function Home() {
           />
         ))}
     </main>
+  );
+}
+
+function HelpTip({ text }: { text: string }) {
+  return (
+    <span className="help-tip" tabIndex={0} aria-label={text} data-tooltip={text} title={text}>
+      ?
+    </span>
   );
 }
 
