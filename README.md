@@ -10,9 +10,9 @@ orders.
 
 ## What it does
 
-1. Connects to ShipHero with the existing server refresh token, or a token
-   pasted into the page for a one-off override.
-2. Lists 3PL clients in a dropdown.
+1. Connects to ShipHero with the existing server refresh token, or a browser
+   token saved on the Settings page for a one-off override.
+2. Lists 3PL clients in a client filter dropdown.
 3. Reads the same standard ShipHero order-upload CSV used for the ShipHero
    order import.
 4. Uses `Product Sku (Required)` and `Quantity` as the pick-list driver.
@@ -41,26 +41,24 @@ The app defaults to the Vercel environment variable:
 SHIPHERO_REFRESH_TOKEN
 ```
 
-In the page, leave **Token source** as **Use saved server token** to keep using
-that stored token. When the app opens, it validates the saved refresh token and
-loads the client list. If the page says **ShipHero connection verified**, the
-saved token is working and no token needs to be pasted for normal use. To test
-or recover from an expired token, choose **Refresh token** or **Access token**,
-paste the value, and click **Load clients**.
+The pick-list page uses the saved server token by default. Open **Settings** to
+switch to a browser refresh token or browser access token. Browser tokens are
+stored only in that browser and are used for ShipHero lookups: client list, SKU,
+product, bin/location, and on-hand quantity.
 
-The pasted token is only used for ShipHero lookups in that browser session:
-client list, SKU, product, bin/location, and on-hand quantity.
+When the app opens, it validates the active token and loads the client list. If
+the page says the token is verified, no extra token entry is needed on the work
+page.
 
 ## Usage
 
 1. Open the app.
-2. Choose **Use saved server token**, or paste an override token.
-3. Click **Load clients**.
-4. Pick a client, or leave **All clients** if you do not want a client filter.
-5. Upload the exact same ShipHero order CSV used for the ShipHero order import.
-6. Choose sort and optional location prefixes.
-7. Click **Generate pick lists**.
-8. Click **Print**.
+2. Open **Settings** only if you need to change the token source.
+3. Pick a client filter, or leave **All clients** if SKUs are unique across clients.
+4. Upload the exact same ShipHero order CSV used for the ShipHero order import.
+5. Choose sort and optional location prefixes.
+6. Click **Generate pick lists**.
+7. Click **Print**.
 
 ## CSV Format
 
@@ -100,12 +98,14 @@ npm run dev
 ```text
 app/
   page.tsx                # Upload UI + printable pick list
+  settings/page.tsx       # Token source and browser token settings
   globals.css             # Screen + print CSS
   api/
     bins/route.ts         # POST /api/bins - SKU bin/location lookup
     clients/route.ts      # GET/POST /api/clients - client list
     picklist/route.ts     # POST /api/picklist - pick-list generation
 lib/
+  auth-settings.ts        # Browser token settings helper
   picklist.ts             # Pick quantity allocation + sort modes
   shiphero.ts             # Token refresh + read-only GraphQL queries
   sort.ts                 # Natural alphanumeric sort helpers

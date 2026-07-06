@@ -153,6 +153,43 @@ button.secondary {
   font-weight: 600;
 }
 
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 39px;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.button-link.secondary {
+  background: #fff;
+  color: #1a1a1a;
+  border: 1px solid #ccc;
+}
+
+.page-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.settings-summary {
+  color: #333;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
 .banner {
   padding: 10px 12px;
   border-radius: 6px;
