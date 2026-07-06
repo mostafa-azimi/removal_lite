@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import Papa from "papaparse";
+import {
+  DEFAULT_TOKEN_SETTINGS,
+  buildAuthPayload,
+  loadTokenSettings,
+  tokenSourceLabel,
+  type TokenSettings,
+} from "@/lib/auth-settings";
 import {
   PICK_SORT_OPTIONS,
   allocatePickRows,
@@ -39,8 +47,6 @@ type OrderResult = {
   totals: { uniqueSkus: number; totalQty: number };
 };
 
-type TokenKind = "env" | "refresh" | "access";
-
 // Only three columns matter from the CSV.
 const SKU_HEADER = "Product Sku (Required)";
 const QTY_HEADER = "Quantity";
@@ -66,13 +72,6 @@ function parseLocationPrefixes(value: string): string[] {
     });
 }
 
-function buildAuthPayload(tokenKind: TokenKind, tokenValue: string) {
-  const token = tokenValue.trim();
-  if (tokenKind === "env") return null;
-  if (!token) return null;
-  return tokenKind === "refresh" ? { refreshToken: token } : { accessToken: token };
-}
-
 export default function Home() {
   const [clients, setClients] = useState<ClientAccount[] | null>(null);
   const [clientsError, setClientsError] = useState<string | null>(null);
@@ -85,8 +84,7 @@ export default function Home() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [orders, setOrders] = useState<OrderResult[] | null>(null);
   const [generatedAt, setGeneratedAt] = useState<string>("");
-  const [tokenKind, setTokenKind] = useState<TokenKind>("env");
-  const [tokenValue, setTokenValue] = useState("");
+  const [tokenSettings, setTokenSettings] = useState<TokenSettings>(DEFAULT_TOKEN_SETTINGS);
   const [clientsLoading, setClientsLoading] = useState(false);
   const [clientsSource, setClientsSource] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus | null>(null);
@@ -94,12 +92,12 @@ export default function Home() {
   const [pickSortMode, setPickSortMode] = useState<PickSortMode>("location");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  async function loadClients(kind: TokenKind = tokenKind, value: string = tokenValue) {
+  async function loadClients(settings: TokenSettings = tokenSettings) {
     setClientsLoading(true);
     setClientsError(null);
     setConnectionStatus(null);
     try {
-      const auth = buildAuthPayload(kind, value);
+      const auth = buildAuthPayload(settings);
       const res = await fetch("/api/clients", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -122,7 +120,9 @@ export default function Home() {
   }
 
   useEffect(() => {
-    loadClients("env", "");
+    const saved = loadTokenSettings();
+    setTokenSettings(saved);
+    loadClients(saved);
   }, []);
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -177,9 +177,11 @@ export default function Home() {
 
   async function generate() {
     if (!csvLines || csvLines.length === 0) return;
-    const auth = buildAuthPayload(tokenKind, tokenValue);
-    if (tokenKind !== "env" && !auth) {
-      setSubmitError("Enter a ShipHero token before generating the pick list.");
+    const settings = loadTokenSettings();
+    setTokenSettings(settings);
+    const auth = buildAuthPayload(settings);
+    if (settings.tokenKind !== "env" && !auth) {
+      setSubmitError("Add a ShipHero token in Settings before generating the pick list.");
       return;
     }
     setLoading(true);
@@ -316,8 +318,7 @@ export default function Home() {
       <div className="no-print">
         <h1>Shiphero Pick List</h1>
         <p className="subtitle">
-          Add a ShipHero token, upload one ShipHero order CSV, and print a pick list from the
-          SKU and quantity rows.
+          Upload the same ShipHero order CSV and print a pick list from the SKU and quantity rows.
         </p>
 
         {clientsError && (
@@ -327,52 +328,29 @@ export default function Home() {
         )}
 
         <div className="card">
-          <h2>1. Connect to ShipHero</h2>
-          <div className="field-grid compact">
-            <label>
-              <span className="label-with-help">
-                Token source
-                <HelpTip text="When the app opens, it validates the saved ShipHero refresh token. If the connection is verified, users do not need to paste a token." />
-              </span>
-              <select
-                value={tokenKind}
-                onChange={(e) => {
-                  const nextKind = e.target.value as TokenKind;
-                  setTokenKind(nextKind);
-                  setSelectedClient("");
-                  setConnectionStatus(null);
-                  setOrders(null);
-                }}
-              >
-                <option value="env">Use saved server token</option>
-                <option value="refresh">Refresh token</option>
-                <option value="access">Access token</option>
-              </select>
-            </label>
-
-            {tokenKind !== "env" && (
-              <label>
-                ShipHero token
-                <input
-                  type="password"
-                  value={tokenValue}
-                  onChange={(e) => {
-                    setTokenValue(e.target.value);
-                    setConnectionStatus(null);
-                    setOrders(null);
-                  }}
-                  placeholder={tokenKind === "refresh" ? "Paste refresh token" : "Paste access token"}
-                />
-              </label>
-            )}
+          <h2>1. ShipHero connection</h2>
+          <div className="row">
+            <span className="settings-summary">
+              Token source: <strong>{tokenSourceLabel(tokenSettings)}</strong>
+            </span>
+            <Link className="button-link secondary" href="/settings">
+              Settings
+            </Link>
+            <button
+              className="secondary"
+              onClick={() => {
+                const saved = loadTokenSettings();
+                setTokenSettings(saved);
+                loadClients(saved);
+              }}
+              disabled={clientsLoading}
+            >
+              {clientsLoading ? "Checking..." : "Recheck connection"}
+            </button>
           </div>
-          <p style={{ color: "#777", fontSize: 12, margin: "8px 0 12px" }}>
-            Most users should leave this on <strong>Use saved server token</strong>. Paste a
-            token only if the connection check fails or you need to use a different ShipHero account.
-          </p>
           {clientsLoading && !clients && (
             <div className="banner info" style={{ marginTop: 12 }}>
-              Checking the saved ShipHero refresh token and loading clients...
+              Checking the ShipHero token and loading clients...
             </div>
           )}
           {clients && (
@@ -382,17 +360,17 @@ export default function Home() {
             >
               {connectionStatus?.status === "verified" ? (
                 <>
-                  {tokenKind === "access"
+                  {tokenSettings.tokenKind === "access"
                     ? "ShipHero access token verified."
-                    : tokenKind === "refresh"
-                      ? "Pasted ShipHero refresh token validated."
+                    : tokenSettings.tokenKind === "refresh"
+                      ? "Browser ShipHero refresh token validated."
                       : "Saved ShipHero refresh token validated."}{" "}
-                  You do not need to paste a token for normal use.
+                  Token changes live in Settings.
                 </>
               ) : connectionStatus?.status === "failed" ? (
                 <>
-                  The client list is loaded from the saved app list, but ShipHero has not verified the
-                  token yet: {connectionStatus.message}
+                  Client list loaded from the saved app list, but ShipHero has not verified the
+                  token: {connectionStatus.message}
                 </>
               ) : (
                 <>
@@ -401,15 +379,15 @@ export default function Home() {
               )}
             </div>
           )}
+        </div>
+
+        <div className="card">
+          <h2>2. Client filter</h2>
+          <p style={{ color: "#777", fontSize: 12, margin: "0 0 12px" }}>
+            Optional, but recommended when the same SKU may exist under multiple ShipHero clients.
+          </p>
           <div className="row">
-            <button
-              className="secondary"
-              onClick={() => loadClients()}
-              disabled={clientsLoading || (tokenKind !== "env" && !tokenValue.trim())}
-            >
-              {clientsLoading ? "Connecting..." : "Load clients"}
-            </button>
-            <label htmlFor="client">Client</label>
+            <label htmlFor="client">Client filter</label>
             <select
               id="client"
               value={selectedClient}
@@ -419,7 +397,7 @@ export default function Home() {
               }}
               disabled={clientsLoading || !clients}
             >
-              <option value="">{clients ? "All clients (no filter)" : "Load clients first"}</option>
+              <option value="">{clients ? "All clients" : "Checking connection..."}</option>
               {clients?.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.companyName}
@@ -442,7 +420,7 @@ export default function Home() {
 
         <div className="card">
           <h2 className="heading-with-help">
-            2. Upload the same CSV you upload into ShipHero
+            3. Upload the same CSV you upload into ShipHero
             <HelpTip text="Use the standard ShipHero order-upload CSV here too. The app only reads order number, SKU, and quantity, so the address and shipping columns can stay in the file." />
           </h2>
           <div className="banner info">
@@ -470,7 +448,7 @@ export default function Home() {
         </div>
 
         <div className="card">
-          <h2>3. Pick list</h2>
+          <h2>4. Pick list</h2>
           <div className="field-grid compact">
             <label>
               Sort pick list
