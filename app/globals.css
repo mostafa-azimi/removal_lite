@@ -52,6 +52,58 @@ button {
   margin: 0 0 12px;
 }
 
+.heading-with-help,
+.label-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.help-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid #b9bfca;
+  border-radius: 50%;
+  color: #4c5565;
+  background: #f7f8fa;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+
+.help-tip::after {
+  position: absolute;
+  z-index: 20;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: min(320px, calc(100vw - 48px));
+  padding: 9px 10px;
+  border: 1px solid #d7d9df;
+  border-radius: 6px;
+  background: #111;
+  color: #fff;
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  transform: translateX(-50%);
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.help-tip:hover::after,
+.help-tip:focus::after {
+  opacity: 1;
+}
+
 .row {
   display: flex;
   align-items: center;

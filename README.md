@@ -42,9 +42,10 @@ SHIPHERO_REFRESH_TOKEN
 ```
 
 In the page, leave **Token source** as **Use saved server token** to keep using
-that stored token. If the page says **ShipHero connection verified**, the saved
-token is working and no token needs to be pasted for normal use. To test or
-recover from an expired token, choose **Refresh token** or **Access token**,
+that stored token. When the app opens, it validates the saved refresh token and
+loads the client list. If the page says **ShipHero connection verified**, the
+saved token is working and no token needs to be pasted for normal use. To test
+or recover from an expired token, choose **Refresh token** or **Access token**,
 paste the value, and click **Load clients**.
 
 The pasted token is only used for ShipHero lookups in that browser session:

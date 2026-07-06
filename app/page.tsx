@@ -330,7 +330,10 @@ export default function Home() {
           <h2>1. Connect to ShipHero</h2>
           <div className="field-grid compact">
             <label>
-              Token source
+              <span className="label-with-help">
+                Token source
+                <HelpTip text="When the app opens, it validates the saved ShipHero refresh token. If the connection is verified, users do not need to paste a token." />
+              </span>
               <select
                 value={tokenKind}
                 onChange={(e) => {
@@ -367,6 +370,11 @@ export default function Home() {
             Most users should leave this on <strong>Use saved server token</strong>. Paste a
             token only if the connection check fails or you need to use a different ShipHero account.
           </p>
+          {clientsLoading && !clients && (
+            <div className="banner info" style={{ marginTop: 12 }}>
+              Checking the saved ShipHero refresh token and loading clients...
+            </div>
+          )}
           {clients && (
             <div
               className={`banner ${connectionStatus?.status === "failed" ? "warn" : "success"}`}
@@ -374,7 +382,12 @@ export default function Home() {
             >
               {connectionStatus?.status === "verified" ? (
                 <>
-                  ShipHero connection verified. You do not need to paste a token for normal use.
+                  {tokenKind === "access"
+                    ? "ShipHero access token verified."
+                    : tokenKind === "refresh"
+                      ? "Pasted ShipHero refresh token validated."
+                      : "Saved ShipHero refresh token validated."}{" "}
+                  You do not need to paste a token for normal use.
                 </>
               ) : connectionStatus?.status === "failed" ? (
                 <>
@@ -428,7 +441,10 @@ export default function Home() {
         </div>
 
         <div className="card">
-          <h2>2. Upload the same CSV you upload into ShipHero</h2>
+          <h2 className="heading-with-help">
+            2. Upload the same CSV you upload into ShipHero
+            <HelpTip text="Use the standard ShipHero order-upload CSV here too. The app only reads order number, SKU, and quantity, so the address and shipping columns can stay in the file." />
+          </h2>
           <div className="banner info">
             Use the exact ShipHero order-upload CSV. Do not create a separate file for this app.
           </div>
@@ -537,6 +553,14 @@ export default function Home() {
           />
         ))}
     </main>
+  );
+}
+
+function HelpTip({ text }: { text: string }) {
+  return (
+    <span className="help-tip" tabIndex={0} aria-label={text} data-tooltip={text} title={text}>
+      ?
+    </span>
   );
 }
 
